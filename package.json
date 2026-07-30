@@ -13,9 +13,15 @@
     "db:generate": "pnpm --filter @ledger/api db:generate",
     "db:migrate": "pnpm --filter @ledger/api db:migrate",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "@eslint/js": "10.0.1",
+    "eslint": "10.8.0",
+    "globals": "17.8.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0"
   }
 }
