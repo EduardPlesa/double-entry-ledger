@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ledger-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ledger
+    ports:
+      # 5433 on the host so this never collides with a locally installed Postgres.
+      - '5433:5432'
+    volumes:
+      - ledger-pgdata:/var/lib/postgresql/data
+      # Cluster bootstrap. Runs once, on an empty data directory, as the superuser.
+      # The integration tests copy this same file into their Testcontainers instance,
+      # so dev and test databases are provisioned identically.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d ledger']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  ledger-pgdata:

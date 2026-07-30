@@ -1,0 +1,3 @@
+# Normalise to LF in the repository. Stage 7 runs CI on Linux; without this, files
+# authored on Windows land with CRLF and every cross-platform diff carries noise.
+* text=auto eol=lf

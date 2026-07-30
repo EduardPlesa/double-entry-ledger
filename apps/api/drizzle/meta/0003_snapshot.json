@@ -1,0 +1,427 @@
+{
+  "id": "482a131c-1562-4eef-b096-da63eee2cf40",
+  "prevId": "9e8612b2-1115-44eb-9d33-df89bf0d4a8c",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.accounts": {
+      "name": "accounts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "book_id": {
+          "name": "book_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "account_type",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "parent_id": {
+          "name": "parent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_at": {
+          "name": "closed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "accounts_book_id_books_id_fk": {
+          "name": "accounts_book_id_books_id_fk",
+          "tableFrom": "accounts",
+          "columnsFrom": [
+            "book_id"
+          ],
+          "tableTo": "books",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "accounts_parent_same_book_fk": {
+          "name": "accounts_parent_same_book_fk",
+          "tableFrom": "accounts",
+          "columnsFrom": [
+            "parent_id",
+            "book_id"
+          ],
+          "tableTo": "accounts",
+          "columnsTo": [
+            "id",
+            "book_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "accounts_id_book_id_key": {
+          "name": "accounts_id_book_id_key",
+          "columns": [
+            "id",
+            "book_id"
+          ],
+          "nullsNotDistinct": false
+        },
+        "accounts_id_book_id_currency_key": {
+          "name": "accounts_id_book_id_currency_key",
+          "columns": [
+            "id",
+            "book_id",
+            "currency"
+          ],
+          "nullsNotDistinct": false
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "accounts_name_not_blank": {
+          "name": "accounts_name_not_blank",
+          "value": "length(btrim(\"accounts\".\"name\")) > 0"
+        },
+        "accounts_currency_iso4217": {
+          "name": "accounts_currency_iso4217",
+          "value": "\"accounts\".\"currency\" ~ '^[A-Z]{3}$'"
+        },
+        "accounts_parent_not_self": {
+          "name": "accounts_parent_not_self",
+          "value": "\"accounts\".\"parent_id\" is distinct from \"accounts\".\"id\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.books": {
+      "name": "books",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_currency": {
+          "name": "base_currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "books_name_not_blank": {
+          "name": "books_name_not_blank",
+          "value": "length(btrim(\"books\".\"name\")) > 0"
+        },
+        "books_base_currency_iso4217": {
+          "name": "books_base_currency_iso4217",
+          "value": "\"books\".\"base_currency\" ~ '^[A-Z]{3}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.entries": {
+      "name": "entries",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "book_id": {
+          "name": "book_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "external_id": {
+          "name": "external_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reversal_of": {
+          "name": "reversal_of",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_api_key_id": {
+          "name": "created_by_api_key_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "entries_book_id_external_id_key": {
+          "name": "entries_book_id_external_id_key",
+          "columns": [
+            {
+              "expression": "book_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "external_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "where": "\"entries\".\"external_id\" is not null",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "entries_book_id_books_id_fk": {
+          "name": "entries_book_id_books_id_fk",
+          "tableFrom": "entries",
+          "columnsFrom": [
+            "book_id"
+          ],
+          "tableTo": "books",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "entries_reversal_same_book_fk": {
+          "name": "entries_reversal_same_book_fk",
+          "tableFrom": "entries",
+          "columnsFrom": [
+            "reversal_of",
+            "book_id"
+          ],
+          "tableTo": "entries",
+          "columnsTo": [
+            "id",
+            "book_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "entries_id_book_id_key": {
+          "name": "entries_id_book_id_key",
+          "columns": [
+            "id",
+            "book_id"
+          ],
+          "nullsNotDistinct": false
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "entries_description_not_blank": {
+          "name": "entries_description_not_blank",
+          "value": "length(btrim(\"entries\".\"description\")) > 0"
+        },
+        "entries_external_id_not_blank": {
+          "name": "entries_external_id_not_blank",
+          "value": "\"entries\".\"external_id\" is null or length(btrim(\"entries\".\"external_id\")) > 0"
+        },
+        "entries_reversal_not_self": {
+          "name": "entries_reversal_not_self",
+          "value": "\"entries\".\"reversal_of\" is distinct from \"entries\".\"id\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.postings": {
+      "name": "postings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "entry_id": {
+          "name": "entry_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "book_id": {
+          "name": "book_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_minor": {
+          "name": "amount_minor",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "postings_entry_same_book_fk": {
+          "name": "postings_entry_same_book_fk",
+          "tableFrom": "postings",
+          "columnsFrom": [
+            "entry_id",
+            "book_id"
+          ],
+          "tableTo": "entries",
+          "columnsTo": [
+            "id",
+            "book_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "postings_account_same_book_currency_fk": {
+          "name": "postings_account_same_book_currency_fk",
+          "tableFrom": "postings",
+          "columnsFrom": [
+            "account_id",
+            "book_id",
+            "currency"
+          ],
+          "tableTo": "accounts",
+          "columnsTo": [
+            "id",
+            "book_id",
+            "currency"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "postings_currency_iso4217": {
+          "name": "postings_currency_iso4217",
+          "value": "\"postings\".\"currency\" ~ '^[A-Z]{3}$'"
+        },
+        "postings_amount_nonzero": {
+          "name": "postings_amount_nonzero",
+          "value": "\"postings\".\"amount_minor\" <> 0"
+        }
+      },
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {
+    "public.account_type": {
+      "name": "account_type",
+      "schema": "public",
+      "values": [
+        "asset",
+        "liability",
+        "equity",
+        "revenue",
+        "expense"
+      ]
+    }
+  },
+  "schemas": {},
+  "views": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

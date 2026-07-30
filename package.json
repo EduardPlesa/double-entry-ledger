@@ -1,0 +1,21 @@
+{
+  "name": "ledger",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:nuke": "docker compose down -v",
+    "db:generate": "pnpm --filter @ledger/api db:generate",
+    "db:migrate": "pnpm --filter @ledger/api db:migrate",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
