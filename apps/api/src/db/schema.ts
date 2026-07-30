@@ -4,8 +4,12 @@ import {
   bigserial,
   check,
   foreignKey,
+  index,
+  integer,
+  jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -110,11 +114,13 @@ export const entries = pgTable(
     // Set when this entry reverses another. Corrections are new entries, never edits.
     reversalOf: uuid('reversal_of'),
 
-    // No foreign keys yet: users and api_keys arrive in stage 3. Left nullable and
-    // unconstrained rather than omitted, so the columns the audit trail needs exist
-    // before any row is written to a table that can never be altered.
-    createdByUserId: uuid('created_by_user_id'),
-    createdByApiKeyId: uuid('created_by_api_key_id'),
+    // Who recorded it. Exactly one of these is set for an entry written through the API -
+    // a session or a machine client - and both are null for the rows stage 1 and 2 wrote
+    // before either table existed. Nullable rather than a CHECK demanding one, because
+    // history cannot be backfilled: the immutability trigger means a row written without
+    // an author stays without one forever.
+    createdByUserId: uuid('created_by_user_id').references(() => users.id),
+    createdByApiKeyId: uuid('created_by_api_key_id').references(() => apiKeys.id),
   },
   (t) => [
     check('entries_description_not_blank', sql`length(btrim(${t.description})) > 0`),
@@ -193,5 +199,244 @@ export const postings = pgTable(
     // indexes, and stage 7 adds them with EXPLAIN ANALYZE either side to show what they
     // buy. Indexing a foreign key column is usually about making parent deletes cheap,
     // and in this schema nothing is ever deleted.
+  ],
+);
+
+/**
+ * The three per-book roles. An enum for the same reason `account_type` is one: the set is
+ * fixed by the policy map in `domain/policy.ts`, and a role the database accepts but the
+ * policy map has never heard of would authorise nothing while looking like it authorises
+ * something. Adding a fourth role means editing both, which is the intended friction.
+ */
+export const bookRole = pgEnum('book_role', ['owner', 'accountant', 'viewer']);
+
+export const users = pgTable(
+  'users',
+  {
+    id: uuid('id').primaryKey(),
+
+    // Normalised - trimmed and lowercased - before it ever reaches here, so that the plain
+    // unique constraint below is a real guarantee rather than one a differently-cased
+    // duplicate walks straight past. The CHECK is what makes "normalised" a fact about the
+    // column instead of a habit of one service method.
+    email: text('email').notNull(),
+
+    // argon2id, encoded in PHC string format, which carries its own parameters. That is
+    // what makes the cost factors changeable later without invalidating existing hashes:
+    // each row records how it was hashed.
+    passwordHash: text('password_hash').notNull(),
+
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('users_email_key').on(t.email),
+    check('users_email_normalised', sql`${t.email} = lower(btrim(${t.email}))`),
+
+    // Deliberately shallow. An email address is validated by sending mail to it, not by a
+    // regular expression; this rejects only the shapes that are certainly mistakes.
+    check('users_email_shape', sql`${t.email} ~ '^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$'`),
+  ],
+);
+
+/**
+ * Refresh tokens, as a rotation chain rather than a current value.
+ *
+ * Every token belongs to a family, and a family is one login session. Rotation redeems the
+ * presented token and issues a successor in the same family, so the table accumulates the
+ * whole history of a session rather than overwriting it.
+ *
+ * That history is the feature. Presenting a token that has already been redeemed means
+ * either the token was stolen and the thief got there first, or it was stolen after the
+ * legitimate holder used it - and from the server's side those are indistinguishable. The
+ * only safe response is to revoke the entire family, which is one UPDATE precisely because
+ * the family id is a column here.
+ */
+export const refreshTokens = pgTable(
+  'refresh_tokens',
+  {
+    id: uuid('id').primaryKey(),
+
+    // Constant for the life of a session. Not a foreign key to a sessions table: there is
+    // no sessions table, because nothing yet asks a question about a session that this
+    // column cannot answer.
+    familyId: uuid('family_id').notNull(),
+
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+
+    // HMAC-SHA256 under a pepper held only in the application's configuration, hex encoded.
+    // Not argon2: the token is 256 bits of CSPRNG output, so there is no dictionary to
+    // mount and no reason to pay a deliberately slow hash on every refresh. The pepper is
+    // what stops a leaked table alone from yielding usable tokens.
+    tokenHash: text('token_hash').notNull(),
+
+    issuedAt: timestamp('issued_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+
+    /** Set the moment this token is exchanged. A second exchange is the reuse signal. */
+    redeemedAt: timestamp('redeemed_at', { withTimezone: true, mode: 'date' }),
+
+    /** Set on logout, and on every token in a family when reuse is detected. */
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'date' }),
+
+    /** The successor issued when this token was redeemed. Makes the chain walkable. */
+    replacedBy: uuid('replaced_by'),
+
+    // Recorded for the incident, not for the decision: nothing authenticates on these, and
+    // an audit trail that says only "a token was reused" answers no question worth asking.
+    // Text rather than inet because the value arrives from a proxy header and a malformed
+    // one must not be able to fail the insert that is trying to record it.
+    userAgent: text('user_agent'),
+    ip: text('ip'),
+  },
+  (t) => [
+    unique('refresh_tokens_token_hash_key').on(t.tokenHash),
+
+    // Reuse detection revokes by family, and that UPDATE is on the incident path where
+    // latency matters least - but it is also the only query that scans by family, and the
+    // index costs one page in a table this shape.
+    index('refresh_tokens_family_id_idx').on(t.familyId),
+    index('refresh_tokens_user_id_idx').on(t.userId),
+
+    foreignKey({
+      name: 'refresh_tokens_replaced_by_fk',
+      columns: [t.replacedBy],
+      foreignColumns: [t.id],
+    }),
+
+    check('refresh_tokens_expires_after_issue', sql`${t.expiresAt} > ${t.issuedAt}`),
+    check('refresh_tokens_replaced_by_not_self', sql`${t.replacedBy} is distinct from ${t.id}`),
+
+    // A successor exists only where one was redeemed. The converse is not required: a
+    // redeemed token whose family was revoked in the same breath never gets a successor.
+    check('refresh_tokens_replacement_implies_redeemed', sql`${t.replacedBy} is null or ${t.redeemedAt} is not null`),
+  ],
+);
+
+/**
+ * Who may do what, in which book.
+ *
+ * The role is stored; the permissions are not. `domain/policy.ts` holds the single map
+ * from permission to roles, and putting permissions in the database would immediately make
+ * two authorities out of one - the usual way an authorisation system ends up allowing
+ * something nobody meant to allow.
+ */
+export const bookMembers = pgTable(
+  'book_members',
+  {
+    bookId: uuid('book_id')
+      .notNull()
+      .references(() => books.id),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    role: bookRole('role').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One role per user per book, and the primary key is also the index the authorisation
+    // middleware hits on every single request.
+    primaryKey({ name: 'book_members_pkey', columns: [t.bookId, t.userId] }),
+
+    // The other direction: the books a user belongs to. Not served by the primary key,
+    // whose leading column is the book.
+    index('book_members_user_id_idx').on(t.userId),
+  ],
+);
+
+/**
+ * API keys for machine clients.
+ *
+ * Scoped to one book with one role, which is narrower than a user - a user may be a member
+ * of many books, a key never is. That is deliberate: a key is a credential that lives in
+ * someone's CI configuration, and the blast radius of losing one should be a single book.
+ */
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid('id').primaryKey(),
+    bookId: uuid('book_id')
+      .notNull()
+      .references(() => books.id),
+    role: bookRole('role').notNull(),
+
+    // SHA-256 of the presented key, hex encoded. Unlike a password this is high-entropy
+    // random, so a fast hash is the right one; unlike a refresh token it is not peppered,
+    // because a key is verified by exact lookup and the pepper would buy only what the
+    // 256-bit random part already provides.
+    tokenHash: text('token_hash').notNull(),
+
+    // What the UI can show: scheme, environment and the first characters of the random
+    // part. Enough to tell two keys apart in a list, useless for authenticating.
+    prefix: text('prefix').notNull(),
+
+    name: text('name').notNull(),
+
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id),
+
+    // Advanced at most once a minute, not on every request: a read endpoint that writes a
+    // row per call is a read endpoint that takes a lock per call, and minute resolution
+    // answers the only question this column exists for - is this key still in use.
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'date' }),
+
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'date' }),
+  },
+  (t) => [
+    unique('api_keys_token_hash_key').on(t.tokenHash),
+    index('api_keys_book_id_idx').on(t.bookId),
+    check('api_keys_name_not_blank', sql`length(btrim(${t.name})) > 0`),
+    check('api_keys_prefix_shape', sql`${t.prefix} ~ '^lk_[a-z]+_'`),
+  ],
+);
+
+/**
+ * Transport-level replay protection, complementary to `entries.external_id`.
+ *
+ * The two solve different halves of the same problem. `external_id` makes recording the
+ * same entry twice a no-op no matter how it arrives; this makes retrying the same HTTP
+ * call return the same HTTP response - including for requests that create no entry at all,
+ * and including the 422 the first attempt received.
+ *
+ * The row is inserted before the handler runs, which is what makes reserving a key atomic:
+ * a concurrent retry loses the insert and can tell from `completed_at` whether the first
+ * attempt is still in flight or has an answer to hand back.
+ */
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    bookId: uuid('book_id')
+      .notNull()
+      .references(() => books.id),
+
+    /** Caller-supplied, from the `Idempotency-Key` header. */
+    key: text('key').notNull(),
+
+    // SHA-256 over the method, the path and the raw body. Replaying a key against a
+    // different request is a client bug, and returning the first request's response to it
+    // would hide the bug behind a plausible answer.
+    requestFingerprint: text('request_fingerprint').notNull(),
+
+    /** Null until the first attempt finishes. Null here is what "in flight" means. */
+    status: integer('status'),
+    responseBody: jsonb('response_body'),
+
+    /** The entry the call created, where it created one. Links an HTTP retry to history. */
+    entryId: uuid('entry_id').references(() => entries.id),
+
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
+  },
+  (t) => [
+    primaryKey({ name: 'idempotency_keys_pkey', columns: [t.bookId, t.key] }),
+    check('idempotency_keys_key_not_blank', sql`length(btrim(${t.key})) > 0`),
+
+    // Complete means all three, or none of them. A row with a status and no timestamp
+    // would read as in-flight to the next request and as finished to the one after it.
+    check(
+      'idempotency_keys_completion_consistent',
+      sql`(${t.completedAt} is null) = (${t.status} is null) and (${t.completedAt} is null) = (${t.responseBody} is null)`,
+    ),
   ],
 );

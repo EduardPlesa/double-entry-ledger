@@ -70,6 +70,12 @@ export interface PostingLine {
 
 export interface LedgerRepository {
   bookExists(executor: Executor, bookId: string): Promise<boolean>;
+  /**
+   * The book an account belongs to, or null. Readable without a book context, which is the
+   * only reason it can be the first step of establishing one.
+   */
+  bookOfAccount(executor: Executor, accountId: string): Promise<string | null>;
+  bookOfEntry(executor: Executor, entryId: string): Promise<string | null>;
   findAccountsByIds(executor: Executor, accountIds: readonly string[]): Promise<AccountRecord[]>;
   findAccountById(executor: Executor, accountId: string): Promise<AccountRecord | null>;
   findEntryByExternalId(
@@ -93,6 +99,27 @@ export class DrizzleLedgerRepository implements LedgerRepository {
   async bookExists(executor: Executor, bookId: string): Promise<boolean> {
     const rows = await executor.select({ id: books.id }).from(books).where(eq(books.id, bookId)).limit(1);
     return rows.length > 0;
+  }
+
+  /**
+   * Both of these call the SECURITY DEFINER functions from migration 0006 rather than
+   * selecting from the table. That is the whole point of them: `accounts` and `entries` are
+   * behind a policy keyed on the book, so an ordinary SELECT here would need the answer it
+   * is being asked to produce. The functions run as the table owner, return exactly one uuid
+   * and nothing else, and are the only sanctioned way out of that circle.
+   */
+  async bookOfAccount(executor: Executor, accountId: string): Promise<string | null> {
+    const result = await executor.execute<{ book_id: string | null }>(
+      sql`select book_of_account(${accountId}) as book_id`,
+    );
+    return result.rows[0]?.book_id ?? null;
+  }
+
+  async bookOfEntry(executor: Executor, entryId: string): Promise<string | null> {
+    const result = await executor.execute<{ book_id: string | null }>(
+      sql`select book_of_entry(${entryId}) as book_id`,
+    );
+    return result.rows[0]?.book_id ?? null;
   }
 
   async findAccountsByIds(executor: Executor, accountIds: readonly string[]): Promise<AccountRecord[]> {
