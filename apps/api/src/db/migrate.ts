@@ -25,15 +25,12 @@ const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedDirectly) {
-  const { default: dotenv } = await import('dotenv');
-  dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '../../../../.env') });
+  // The connection string comes from the config module, like every other environment
+  // variable in the application, and the `.env` file itself is loaded by Node via
+  // `--env-file-if-exists` in the package script. Note which URL: migrations run as
+  // ledger_owner, the role the application never holds.
+  const { getConfig } = await import('../config.js');
 
-  const url = process.env['DATABASE_MIGRATION_URL'];
-  if (url === undefined || url === '') {
-    console.error('DATABASE_MIGRATION_URL is not set. Copy .env.example to .env first.');
-    process.exit(1);
-  }
-
-  await runMigrations(url);
+  await runMigrations(getConfig().database.migrationUrl);
   console.log('migrations applied');
 }
