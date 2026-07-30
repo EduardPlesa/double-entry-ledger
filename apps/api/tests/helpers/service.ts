@@ -50,6 +50,7 @@ export function createService(pool: Pool): ServiceHarness {
 export function createServiceWithFailingTransaction(failure: unknown): LedgerService {
   const unitOfWork: UnitOfWork = {
     transaction: () => Promise.reject(failure),
+    transactionInBook: () => Promise.reject(failure),
     get executor(): never {
       throw new Error('no executor: this harness never gets as far as a query');
     },
@@ -70,6 +71,7 @@ export function createServiceWithoutDatabase(): LedgerService {
 
   const unitOfWork: UnitOfWork = {
     transaction: refuse,
+    transactionInBook: refuse,
     get executor() {
       return refuse();
     },

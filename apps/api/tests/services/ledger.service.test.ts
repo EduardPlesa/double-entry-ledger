@@ -4,7 +4,6 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import {
   AccountClosedError,
   AccountNotFoundError,
-  AccountNotInBookError,
   BookNotFoundError,
   CurrencyMismatchError,
   InvalidCursorError,
@@ -12,7 +11,7 @@ import {
   ValidationError,
 } from '../../src/domain/errors.js';
 import type { LedgerService, PostEntryInput } from '../../src/services/ledger.service.js';
-import { seedBook, withClient, type Book } from '../helpers/ledger.js';
+import { seedBookIn, withBookClient, type Book } from '../helpers/ledger.js';
 import {
   START,
   createService,
@@ -39,7 +38,7 @@ beforeAll(async () => {
   pool = new Pool({ connectionString: inject('appUrl'), max: 6 });
   harness = createService(pool);
   service = harness.service;
-  book = await withClient(pool, seedBook);
+  book = await seedBookIn(pool);
 });
 
 afterAll(async () => {
@@ -60,13 +59,14 @@ function sale(overrides: Partial<PostEntryInput> = {}, target: Book = book): Pos
 }
 
 async function freshBook(): Promise<Book> {
-  return withClient(pool, seedBook);
+  return seedBookIn(pool);
 }
 
 async function countEntries(bookId: string): Promise<number> {
-  const result = await pool.query<{ n: number }>(
-    'SELECT count(*)::int AS n FROM entries WHERE book_id = $1',
-    [bookId],
+  // Through a book context, like every other read of this table since migration 0006. A bare
+  // pool query would see nothing and this helper would cheerfully report zero entries.
+  const result = await withBookClient(pool, bookId, (client) =>
+    client.query<{ n: number }>('SELECT count(*)::int AS n FROM entries WHERE book_id = $1', [bookId]),
   );
   return result.rows[0]?.n ?? 0;
 }
@@ -85,8 +85,8 @@ describe('postEntry', () => {
     // Amounts are bigints on the way out, exactly as they went in.
     expect(entry.postings.map((p) => p.amountMinor).sort()).toEqual([-1000n, 1000n]);
 
-    const cash = await service.getBalance(target.cash);
-    const sales = await service.getBalance(target.sales);
+    const cash = await service.getBalance(target.bookId, target.cash);
+    const sales = await service.getBalance(target.bookId, target.sales);
     expect(cash.balance.amountMinor).toBe(1000n);
     expect(sales.balance.amountMinor).toBe(-1000n);
     expect(cash.balance.currency).toBe('EUR');
@@ -118,7 +118,7 @@ describe('postEntry', () => {
     });
 
     expect(entry.postings).toHaveLength(3);
-    expect((await service.getBalance(target.rent)).balance.amountMinor).toBe(10_000n);
+    expect((await service.getBalance(target.bookId, target.rent)).balance.amountMinor).toBe(10_000n);
   });
 
   it('accepts an entry that balances independently in each currency it touches', async () => {
@@ -149,7 +149,7 @@ describe('postEntry', () => {
       ],
     });
 
-    const balance = await service.getBalance(target.cash);
+    const balance = await service.getBalance(target.bookId, target.cash);
     expect(balance.balance.amountMinor).toBe(9_007_199_254_740_993n);
     expect(formatMoney(balance.balance)).toBe('90071992547409.93');
   });
@@ -268,7 +268,15 @@ describe('postEntry, rejections', () => {
     ).rejects.toBeInstanceOf(BookNotFoundError);
   });
 
-  it('rejects a leg pointing at another book’s account', async () => {
+  it('rejects a leg pointing at another book’s account, without confirming it exists', async () => {
+    // Not `AccountNotInBookError`. Since migration 0006 the other book's account is not
+    // visible from inside this book's context at all, so the service cannot tell "somebody
+    // else's account" from "no such account" - and should not be able to. Answering the more
+    // precise error would confirm the existence of a row the caller is not authorised to
+    // know about, which is a membership oracle for anyone holding an id.
+    //
+    // The `bookId` comparison in `assertPostable` stays anyway. It is one map lookup, and it
+    // is the check that still holds if row-level security is ever disabled on a replica.
     const target = await freshBook();
     const other = await freshBook();
 
@@ -281,7 +289,7 @@ describe('postEntry, rejections', () => {
           { accountId: target.sales, amount: '-10.00', currency: 'EUR' },
         ],
       }),
-    ).rejects.toBeInstanceOf(AccountNotInBookError);
+    ).rejects.toBeInstanceOf(AccountNotFoundError);
   });
 
   it('rejects a leg denominated in a currency its account does not hold', async () => {
@@ -319,7 +327,13 @@ describe('postEntry, rejections', () => {
 
   it('rejects a posting to a closed account', async () => {
     const target = await freshBook();
-    await pool.query('UPDATE accounts SET closed_at = now() WHERE id = $1', [target.bank]);
+
+    // In a book context, because row-level security is not a filter that complains: without
+    // one this UPDATE matches zero rows, reports success, and the test goes on to assert
+    // about an account that was never closed.
+    await withBookClient(pool, target.bookId, (client) =>
+      client.query('UPDATE accounts SET closed_at = now() WHERE id = $1', [target.bank]),
+    );
 
     await expect(
       service.postEntry(target.bookId, {
@@ -348,7 +362,7 @@ describe('postEntry, idempotency', () => {
     expect(second.entry.postings).toHaveLength(2);
 
     expect(await countEntries(target.bookId)).toBe(1);
-    expect((await service.getBalance(target.cash)).balance.amountMinor).toBe(1000n);
+    expect((await service.getBalance(target.bookId, target.cash)).balance.amountMinor).toBe(1000n);
   });
 
   it('is keyed on external_id alone: a replay with different legs returns what was recorded', async () => {
@@ -376,7 +390,7 @@ describe('postEntry, idempotency', () => {
 
     expect(replay.created).toBe(false);
     expect(replay.entry.id).toBe(first.entry.id);
-    expect((await service.getBalance(target.cash)).balance.amountMinor).toBe(1000n);
+    expect((await service.getBalance(target.bookId, target.cash)).balance.amountMinor).toBe(1000n);
   });
 
   it('records exactly one entry when two callers race with the same external_id', async () => {
@@ -418,14 +432,14 @@ describe('getBalance', () => {
     await service.postEntry(target.bookId, sale({}, target));
     await service.postEntry(target.bookId, sale({ description: 'another sale' }, target));
 
-    const balance = await service.getBalance(target.cash);
+    const balance = await service.getBalance(target.bookId, target.cash);
     expect(balance.balance.amountMinor).toBe(2000n);
     expect(balance.asOf).toBeNull();
   });
 
   it('is zero for an account with no postings', async () => {
     const target = await freshBook();
-    const balance = await service.getBalance(target.cash);
+    const balance = await service.getBalance(target.bookId, target.cash);
 
     expect(balance.balance.amountMinor).toBe(0n);
     expect(balance.balance.currency).toBe('EUR');
@@ -437,14 +451,14 @@ describe('getBalance', () => {
     await service.postEntry(target.bookId, sale({ occurredAt: '2026-01-15T00:00:00.000Z' }, target));
     await service.postEntry(target.bookId, sale({ occurredAt: '2026-06-15T00:00:00.000Z' }, target));
 
-    const march = await service.getBalance(target.cash, new Date('2026-03-01T00:00:00.000Z'));
+    const march = await service.getBalance(target.bookId, target.cash, new Date('2026-03-01T00:00:00.000Z'));
     expect(march.balance.amountMinor).toBe(1000n);
     expect(march.asOf?.toISOString()).toBe('2026-03-01T00:00:00.000Z');
 
-    const onTheDay = await service.getBalance(target.cash, new Date('2026-01-15T00:00:00.000Z'));
+    const onTheDay = await service.getBalance(target.bookId, target.cash, new Date('2026-01-15T00:00:00.000Z'));
     expect(onTheDay.balance.amountMinor).toBe(1000n);
 
-    expect((await service.getBalance(target.cash)).balance.amountMinor).toBe(2000n);
+    expect((await service.getBalance(target.bookId, target.cash)).balance.amountMinor).toBe(2000n);
   });
 
   it('counts a backdated entry against the period it happened in, not the one it was recorded in', async () => {
@@ -454,12 +468,12 @@ describe('getBalance', () => {
     await service.postEntry(target.bookId, sale({ occurredAt: '2026-06-15T00:00:00.000Z' }, target));
     await service.postEntry(target.bookId, sale({ occurredAt: '2026-01-02T00:00:00.000Z' }, target));
 
-    const january = await service.getBalance(target.cash, new Date('2026-02-01T00:00:00.000Z'));
+    const january = await service.getBalance(target.bookId, target.cash, new Date('2026-02-01T00:00:00.000Z'));
     expect(january.balance.amountMinor).toBe(1000n);
   });
 
   it('rejects an account that does not exist', async () => {
-    await expect(service.getBalance(newId())).rejects.toBeInstanceOf(AccountNotFoundError);
+    await expect(service.getBalance(book.bookId, newId())).rejects.toBeInstanceOf(AccountNotFoundError);
   });
 });
 
@@ -483,12 +497,12 @@ describe('listPostings', () => {
   it('pages oldest first, carrying the running balance across pages', async () => {
     const target = await bookWithFivePostings();
 
-    const first = await service.listPostings(target.cash, { limit: 2 });
+    const first = await service.listPostings(target.bookId, target.cash, { limit: 2 });
     expect(first.items.map((item) => item.amount.amountMinor)).toEqual([100n, 200n]);
     expect(first.items.map((item) => item.runningBalance.amountMinor)).toEqual([100n, 300n]);
     expect(first.nextCursor).not.toBeNull();
 
-    const second = await service.listPostings(target.cash, {
+    const second = await service.listPostings(target.bookId, target.cash, {
       limit: 2,
       cursor: first.nextCursor ?? undefined,
     });
@@ -496,7 +510,7 @@ describe('listPostings', () => {
     // makes a running balance worth anything.
     expect(second.items.map((item) => item.runningBalance.amountMinor)).toEqual([600n, 1000n]);
 
-    const third = await service.listPostings(target.cash, {
+    const third = await service.listPostings(target.bookId, target.cash, {
       limit: 2,
       cursor: second.nextCursor ?? undefined,
     });
@@ -505,12 +519,12 @@ describe('listPostings', () => {
 
     // The last page says so, and the last running balance is the balance.
     expect(third.nextCursor).toBeNull();
-    expect((await service.getBalance(target.cash)).balance.amountMinor).toBe(1500n);
+    expect((await service.getBalance(target.bookId, target.cash)).balance.amountMinor).toBe(1500n);
   });
 
   it('reports no next cursor when the last page is exactly full', async () => {
     const target = await bookWithFivePostings();
-    const page = await service.listPostings(target.cash, { limit: 5 });
+    const page = await service.listPostings(target.bookId, target.cash, { limit: 5 });
 
     expect(page.items).toHaveLength(5);
     expect(page.nextCursor).toBeNull();
@@ -518,7 +532,7 @@ describe('listPostings', () => {
 
   it('carries the entry’s description and timestamps onto each line', async () => {
     const target = await bookWithFivePostings();
-    const page = await service.listPostings(target.cash, { limit: 1 });
+    const page = await service.listPostings(target.bookId, target.cash, { limit: 1 });
     const line = page.items[0];
 
     expect(line?.description).toBe('sale of 1.00');
@@ -529,7 +543,7 @@ describe('listPostings', () => {
 
   it('is empty, with no cursor, for an account with no postings', async () => {
     const target = await freshBook();
-    const page = await service.listPostings(target.cash);
+    const page = await service.listPostings(target.bookId, target.cash);
 
     expect(page.items).toEqual([]);
     expect(page.nextCursor).toBeNull();
@@ -539,7 +553,7 @@ describe('listPostings', () => {
     const target = await freshBook();
 
     for (const cursor of ['nonsense', Buffer.from('p2:1').toString('base64url'), 'AAAA']) {
-      await expect(service.listPostings(target.cash, { cursor })).rejects.toBeInstanceOf(
+      await expect(service.listPostings(target.bookId, target.cash, { cursor })).rejects.toBeInstanceOf(
         InvalidCursorError,
       );
     }
@@ -548,13 +562,13 @@ describe('listPostings', () => {
   it('rejects a page size outside the permitted range', async () => {
     const target = await freshBook();
 
-    await expect(service.listPostings(target.cash, { limit: 0 })).rejects.toBeInstanceOf(ValidationError);
-    await expect(service.listPostings(target.cash, { limit: 5000 })).rejects.toBeInstanceOf(
+    await expect(service.listPostings(target.bookId, target.cash, { limit: 0 })).rejects.toBeInstanceOf(ValidationError);
+    await expect(service.listPostings(target.bookId, target.cash, { limit: 5000 })).rejects.toBeInstanceOf(
       ValidationError,
     );
   });
 
   it('rejects an account that does not exist', async () => {
-    await expect(service.listPostings(newId())).rejects.toBeInstanceOf(AccountNotFoundError);
+    await expect(service.listPostings(book.bookId, newId())).rejects.toBeInstanceOf(AccountNotFoundError);
   });
 });

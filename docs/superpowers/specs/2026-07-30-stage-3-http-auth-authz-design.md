@@ -90,7 +90,11 @@ parameters and never pay a real argon2id hash.
 
 ## Migrations
 
-### 0004_auth.sql
+Three migrations, not two. The repository keeps drizzle-generated SQL exactly as generated,
+so the table definitions stay in a generated file and the grants move into a custom one of
+their own — the same tables / privileges / rules rhythm as 0001, 0002 and 0003.
+
+### 0004_auth.sql (generated)
 
 Tables:
 
@@ -109,25 +113,35 @@ idempotency_keys (book_id, key, request_fingerprint, status, response_body,
 map. `entries.created_by_user_id` and `entries.created_by_api_key_id`, left unconstrained
 in stage 1 because the target tables did not exist, gain their foreign keys here.
 
-Grants follow 0002. `SELECT, INSERT` on all five. `UPDATE` on exactly three columns' worth
-of legitimate mutation: `refresh_tokens` (redeem, revoke, replace), `api_keys`
-(`last_used_at`, `revoke`), `idempotency_keys` (the response snapshot on completion).
-`UPDATE` on `book_members.role` so a role can be changed. No `DELETE` on anything.
+### 0005_auth_privileges.sql
 
-### 0005_rls.sql
+Grants follow 0002. `SELECT, INSERT` on all five tables, and column-level `UPDATE` on
+exactly the three lifecycles that legitimately move: `refresh_tokens (redeemed_at,
+revoked_at, replaced_by)`, `api_keys (last_used_at, revoked_at)`, `idempotency_keys
+(status, response_body, entry_id, completed_at)`, plus `book_members (role)` so a role can
+be changed. No `UPDATE` on `users` at all — password and email change do not exist yet, and
+a capability granted before its feature is a capability nothing is watching. No `DELETE`
+anywhere: a revoked token and a spent idempotency key are evidence, and reclaiming the
+space is an operator's job run as `ledger_owner`.
+
+### 0006_row_level_security.sql
 
 ```sql
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY accounts_book_isolation ON accounts
   FOR ALL
-  USING      (book_id = current_setting('app.current_book_id', true)::uuid)
-  WITH CHECK (book_id = current_setting('app.current_book_id', true)::uuid);
+  TO ledger_app
+  USING      (book_id = nullif(current_setting('app.current_book_id', true), '')::uuid)
+  WITH CHECK (book_id = nullif(current_setting('app.current_book_id', true), '')::uuid);
 ```
 
 Repeated for `entries` and `postings`. `current_setting(name, true)` returns NULL rather
 than raising when the setting is absent, so `book_id = NULL` is NULL, which is not true,
-which is zero rows. Unset therefore fails closed without an exception.
+which is zero rows. Unset therefore fails closed without an exception. `nullif(..., '')`
+covers the other shape of absent: a setting that was set and then reset within the
+transaction reads back as the empty string, and `''::uuid` raises — which would turn a
+missing book context into a 500 from inside a policy rather than an empty result.
 
 The policy binds `ledger_app` because the tables are owned by `ledger_owner` and a table
 owner is exempt from its own policies. That exemption is also what keeps
@@ -167,6 +181,18 @@ so `getBalance` and `listPostings` lose the pooled-executor fast path that stage
 comment defends. The setting is transaction-local, and a connection-local one on a pooled
 handle would leak between requests. The `executor` handle remains for genuinely book-free
 reads — user lookup, membership resolution, refresh-token rotation.
+
+Second consequence: the book stops being implicit. `getBalance` and `listPostings` take a
+`bookId` as their first argument, because the book is what the policy is keyed on and a
+service method that opens a book-scoped transaction has to know which book. The HTTP layer
+has already resolved it during authorization, so no second lookup is needed.
+
+Third, and the reason two stage-2 tests changed: an account in another book is no longer
+visible, so a cross-book leg raises `AccountNotFoundError` rather than
+`AccountNotInBookError`. That is the better answer — the precise one confirms the existence
+of a row the caller was never authorised to know about. The `bookId` comparison in
+`assertPostable` stays regardless: it costs one map lookup and it is the check that still
+holds if row-level security is ever off.
 
 ## Request pipeline
 
