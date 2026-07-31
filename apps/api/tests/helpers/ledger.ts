@@ -28,11 +28,38 @@ export interface Book {
 }
 
 /**
+ * Establishes the book context row-level security is keyed on, for the current transaction.
+ *
+ * Transaction-local, which is the same thing `db/client.ts` does and for the same reason:
+ * connections outlive the work that borrowed them, and a session-level setting would still
+ * be in place for whoever borrows this one next.
+ */
+export async function setBookContext(client: PoolClient, bookId: string): Promise<void> {
+  await client.query("SELECT set_config('app.current_book_id', $1, true)", [bookId]);
+
+  // Outside a transaction, `set_config(..., true)` scopes the setting to the implicit
+  // single-statement transaction and it is gone by the next query - so the caller would get
+  // an opaque row-level security violation several statements later instead of being told
+  // what they actually did wrong.
+  const check = await client.query<{ value: string }>(
+    "SELECT current_setting('app.current_book_id', true) AS value",
+  );
+
+  if (check.rows[0]?.value !== bookId) {
+    throw new Error('the book context did not stick: this must run inside an explicit transaction');
+  }
+}
+
+/**
  * A fresh book with a handful of accounts.
  *
  * Every test seeds its own, because this database has no teardown: entries and postings
  * cannot be deleted or truncated, by design. Isolation comes from disjoint books rather
  * than from cleaning up, which is the same thing the production system has to do.
+ *
+ * Must run inside a transaction, and leaves the new book as the current one. `books` has no
+ * policy - a caller has to be able to find their books before one of them can be current -
+ * but `accounts` does, so the context has to exist before the first account is inserted.
  */
 export async function seedBook(client: PoolClient): Promise<Book> {
   const bookId = newId();
@@ -41,6 +68,8 @@ export async function seedBook(client: PoolClient): Promise<Book> {
     `test book ${bookId}`,
     'EUR',
   ]);
+
+  await setBookContext(client, bookId);
 
   const account = async (name: string, type: string, currency: string): Promise<string> => {
     const id = newId();
@@ -60,6 +89,21 @@ export async function seedBook(client: PoolClient): Promise<Book> {
     cashUsd: await account('Cash USD', 'asset', 'USD'),
     salesUsd: await account('Sales USD', 'revenue', 'USD'),
   };
+}
+
+/** `seedBook` in a transaction of its own, for callers that only want the fixture. */
+export async function seedBookIn(pool: Pool): Promise<Book> {
+  return withClient(pool, async (client) => {
+    await client.query('BEGIN');
+    try {
+      const book = await seedBook(client);
+      await client.query('COMMIT');
+      return book;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+  });
 }
 
 export interface Leg {
@@ -108,11 +152,59 @@ export async function withClient<T>(pool: Pool, fn: (client: PoolClient) => Prom
   }
 }
 
+/**
+ * Borrows a connection, opens a transaction with the book context set, and commits.
+ *
+ * Every read of accounts, entries or postings needs this now. A bare pool query sees no rows
+ * at all - not an error, just nothing - which is exactly the failure row-level security is
+ * designed to produce and exactly the one that would make a test silently assert about an
+ * empty table.
+ */
+export async function withBookClient<T>(
+  pool: Pool,
+  bookId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return withClient(pool, async (client) => {
+    await client.query('BEGIN');
+    try {
+      await setBookContext(client, bookId);
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+  });
+}
+
+/**
+ * One query against the book-scoped tables, with the context set.
+ *
+ * This exists because the mistake it prevents has now been made three times in three
+ * different test files, and it never looks like a mistake: `pool.query` against `accounts`,
+ * `entries` or `postings` without a book context returns zero rows rather than raising, so
+ * the assertion downstream fails with "expected 1, got 0" or passes for entirely the wrong
+ * reason. Reaching for this instead of the pool is the whole fix.
+ */
+export async function queryInBook<T extends Record<string, unknown>>(
+  pool: Pool,
+  bookId: string,
+  text: string,
+  params: readonly unknown[] = [],
+): Promise<T[]> {
+  const result = await withBookClient(pool, bookId, (client) => client.query<T>(text, [...params]));
+  return result.rows;
+}
+
 /** Sum of every posting on an account, read as a bigint. */
-export async function balanceOf(pool: Pool, accountId: string): Promise<bigint> {
-  const result = await pool.query<{ total: string }>(
-    'SELECT coalesce(sum(amount_minor), 0)::text AS total FROM postings WHERE account_id = $1',
-    [accountId],
-  );
-  return BigInt(result.rows[0]?.total ?? '0');
+export async function balanceOf(pool: Pool, bookId: string, accountId: string): Promise<bigint> {
+  return withBookClient(pool, bookId, async (client) => {
+    const result = await client.query<{ total: string }>(
+      'SELECT coalesce(sum(amount_minor), 0)::text AS total FROM postings WHERE account_id = $1',
+      [accountId],
+    );
+    return BigInt(result.rows[0]?.total ?? '0');
+  });
 }

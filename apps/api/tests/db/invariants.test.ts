@@ -1,7 +1,16 @@
 import { newId } from '@ledger/shared';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
-import { balanceOf, insertEntry, minor, seedBook, withClient, type Book } from '../helpers/ledger.js';
+import {
+  balanceOf,
+  insertEntry,
+  minor,
+  seedBook,
+  setBookContext,
+  withBookClient,
+  withClient,
+  type Book,
+} from '../helpers/ledger.js';
 
 /**
  * These run against a real Postgres 16 in a container, migrated by the same code path the
@@ -77,8 +86,8 @@ describe('zero-sum, deferred to COMMIT', () => {
       return seeded;
     });
 
-    expect(await balanceOf(appPool, book.cash)).toBe(2500n);
-    expect(await balanceOf(appPool, book.sales)).toBe(-2500n);
+    expect(await balanceOf(appPool, book.bookId, book.cash)).toBe(2500n);
+    expect(await balanceOf(appPool, book.bookId, book.sales)).toBe(-2500n);
   });
 
   it('commits a balanced entry with three legs', async () => {
@@ -95,9 +104,9 @@ describe('zero-sum, deferred to COMMIT', () => {
       return seeded;
     });
 
-    expect(await balanceOf(appPool, book.rent)).toBe(3000n);
-    expect(await balanceOf(appPool, book.cash)).toBe(-1000n);
-    expect(await balanceOf(appPool, book.bank)).toBe(-2000n);
+    expect(await balanceOf(appPool, book.bookId, book.rent)).toBe(3000n);
+    expect(await balanceOf(appPool, book.bookId, book.cash)).toBe(-1000n);
+    expect(await balanceOf(appPool, book.bookId, book.bank)).toBe(-2000n);
   });
 
   it('rejects legs that net to zero across currencies but not within them', async () => {
@@ -129,8 +138,8 @@ describe('zero-sum, deferred to COMMIT', () => {
       return seeded;
     });
 
-    expect(await balanceOf(appPool, book.cash)).toBe(1000n);
-    expect(await balanceOf(appPool, book.cashUsd)).toBe(2000n);
+    expect(await balanceOf(appPool, book.bookId, book.cash)).toBe(1000n);
+    expect(await balanceOf(appPool, book.bookId, book.cashUsd)).toBe(2000n);
   });
 
   it('rejects an entry with no postings at all', async () => {
@@ -163,7 +172,7 @@ describe('zero-sum, deferred to COMMIT', () => {
       return seeded;
     });
 
-    expect(await balanceOf(appPool, book.cash)).toBe(huge);
+    expect(await balanceOf(appPool, book.bookId, book.cash)).toBe(huge);
   });
 });
 
@@ -190,9 +199,11 @@ describe('append-only, enforced by privilege (ledger_app)', () => {
   });
 
   it('left the recorded entry exactly as it was', async () => {
-    const result = await appPool.query<{ n: number; total: string }>(
-      'SELECT count(*)::int AS n, sum(amount_minor)::text AS total FROM postings WHERE entry_id = $1',
-      [recorded.entryId],
+    const result = await withBookClient(appPool, recorded.book.bookId, (client) =>
+      client.query<{ n: number; total: string }>(
+        'SELECT count(*)::int AS n, sum(amount_minor)::text AS total FROM postings WHERE entry_id = $1',
+        [recorded.entryId],
+      ),
     );
     expect(result.rows[0]?.n).toBe(2);
     expect(BigInt(result.rows[0]?.total ?? '-1')).toBe(0n);
@@ -231,6 +242,11 @@ describe('a posting cannot escape its account', () => {
       await client.query('BEGIN');
       const mine = await seedBook(client);
       const theirs = await seedBook(client);
+
+      // seedBook leaves its own book current, so put mine back: the entry about to be
+      // written belongs to my book, and row-level security would otherwise reject it before
+      // the foreign key under test ever got a look at it.
+      await setBookContext(client, mine.bookId);
 
       // The entry belongs to my book; the account it posts to belongs to theirs.
       await expect(
