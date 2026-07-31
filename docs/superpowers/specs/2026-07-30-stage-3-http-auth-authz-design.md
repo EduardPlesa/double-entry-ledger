@@ -381,6 +381,13 @@ and `@types/supertest` as dev dependencies.
 ## Configuration
 
 New variables, all validated in `config.ts` alongside the existing ones: the JWT secret,
-issuer and audience, access-token lifetime, refresh-token pepper and lifetime, argon2id
-parameters, and the API-key environment label. Secrets have no defaults and a minimum
-length; the config module refuses to boot without them, which is the existing contract.
+issuer and audience, access-token lifetime, refresh-token pepper and lifetime, and the
+argon2id parameters. Secrets have no defaults and a minimum length; the config module
+refuses to boot without them, which is the existing contract. It also refuses to boot if the
+JWT secret and the refresh pepper are the same value — both work perfectly well when they
+are, which is exactly why nothing else would notice.
+
+The API-key environment label (`dev`, `test`, `live`) is *derived* from `NODE_ENV` rather
+than configured. Two variables that must agree are two variables that will eventually
+disagree, and a key reading `lk_live_` minted by a development process is a key someone
+trusts in the wrong place.
