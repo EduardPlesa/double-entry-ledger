@@ -11,6 +11,8 @@ import { ConfigError, loadConfig } from '../../src/config.js';
 const valid = {
   DATABASE_URL: 'postgres://ledger_app:pw@localhost:5433/ledger',
   DATABASE_MIGRATION_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
+  AUTH_JWT_SECRET: 'a'.repeat(32),
+  AUTH_REFRESH_TOKEN_PEPPER: 'b'.repeat(32),
 };
 
 describe('loadConfig', () => {
@@ -53,6 +55,7 @@ describe('loadConfig', () => {
     // that capability back, so it fails here instead of in production.
     expect(() =>
       loadConfig({
+        ...valid,
         DATABASE_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
         DATABASE_MIGRATION_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
       }),
@@ -89,5 +92,57 @@ describe('loadConfig', () => {
 
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.database)).toBe(true);
+    expect(Object.isFrozen(config.auth)).toBe(true);
+    expect(Object.isFrozen(config.auth.argon2)).toBe(true);
+  });
+});
+
+describe('loadConfig, authentication', () => {
+  it('applies the defaults that have one', () => {
+    const { auth } = loadConfig(valid);
+
+    expect(auth.jwtIssuer).toBe('ledger');
+    expect(auth.jwtAudience).toBe('ledger-api');
+    expect(auth.accessTokenTtlSeconds).toBe(600);
+    expect(auth.refreshTokenTtlSeconds).toBe(2_592_000);
+    expect(auth.argon2).toEqual({ memoryCostKib: 19_456, timeCost: 2, parallelism: 1 });
+  });
+
+  it('requires both secrets, with no default for either', () => {
+    const { AUTH_JWT_SECRET: _jwt, ...withoutJwt } = valid;
+    const { AUTH_REFRESH_TOKEN_PEPPER: _pepper, ...withoutPepper } = valid;
+
+    expect(() => loadConfig(withoutJwt)).toThrow(/AUTH_JWT_SECRET/);
+    expect(() => loadConfig(withoutPepper)).toThrow(/AUTH_REFRESH_TOKEN_PEPPER/);
+  });
+
+  it('rejects a secret short enough to have been typed by hand', () => {
+    // Not a strength check - `'a'.repeat(32)` passes and is worthless. It rules out the
+    // category of secret someone invents at the keyboard, and makes the placeholder in
+    // .env.example fail rather than run.
+    expect(() => loadConfig({ ...valid, AUTH_JWT_SECRET: 'short' })).toThrow(/at least 32/);
+  });
+
+  it('rejects one value used as both secrets', () => {
+    // Both work perfectly well when they are the same, which is exactly why nothing else
+    // would ever notice. One leak should not compromise signing and storage at once.
+    expect(() =>
+      loadConfig({ ...valid, AUTH_REFRESH_TOKEN_PEPPER: valid.AUTH_JWT_SECRET }),
+    ).toThrow(/must differ from AUTH_JWT_SECRET/);
+  });
+
+  it('refuses an access-token lifetime long enough to stop being short-lived', () => {
+    // "Just make it a day while I debug this" is a one-character change to an env file. It
+    // should have to be argued for rather than typed.
+    expect(() => loadConfig({ ...valid, AUTH_ACCESS_TOKEN_TTL_SECONDS: '86400' })).toThrow(
+      ConfigError,
+    );
+    expect(loadConfig({ ...valid, AUTH_ACCESS_TOKEN_TTL_SECONDS: '120' }).auth.accessTokenTtlSeconds).toBe(120);
+  });
+
+  it('derives the API key environment label from NODE_ENV', () => {
+    expect(loadConfig(valid).apiKeyEnvironment).toBe('dev');
+    expect(loadConfig({ ...valid, NODE_ENV: 'test' }).apiKeyEnvironment).toBe('test');
+    expect(loadConfig({ ...valid, NODE_ENV: 'production' }).apiKeyEnvironment).toBe('live');
   });
 });

@@ -31,8 +31,39 @@ export function isDatabaseError(error: unknown): error is DatabaseError {
   return error instanceof Error && typeof (error as { code?: unknown }).code === 'string';
 }
 
+/**
+ * How deep to follow `cause`. One wrapper is what drizzle adds; the rest is slack for a
+ * future one, bounded so a cycle cannot hang the process.
+ */
+const MAX_CAUSE_DEPTH = 5;
+
+/**
+ * The driver's error, wherever it ended up in the chain.
+ *
+ * Drizzle does not rethrow node-postgres' error - it throws its own, with the original as
+ * `cause` and a message containing the failed SQL. So a check against the top-level error
+ * finds no SQLSTATE at all and every constraint violation reads as an unrecognised failure:
+ * a 500 instead of a 409, and a zero-sum violation from the database translated into nothing.
+ *
+ * That is a failure mode with no symptom in a unit test, because a test that constructs
+ * `Object.assign(new Error(), { code: 'LG001' })` is testing the shape it just built rather
+ * than the shape the driver produces. It took an integration test against a real duplicate
+ * insert to see it.
+ */
+function findDatabaseError(error: unknown): DatabaseError | null {
+  let current = error;
+
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
+    if (isDatabaseError(current)) return current;
+    if (!(current instanceof Error) || current.cause === undefined) return null;
+    current = current.cause;
+  }
+
+  return null;
+}
+
 export function hasSqlState(error: unknown, sqlState: string): boolean {
-  return isDatabaseError(error) && error.code === sqlState;
+  return findDatabaseError(error)?.code === sqlState;
 }
 
 /**
@@ -43,7 +74,8 @@ export function hasSqlState(error: unknown, sqlState: string): boolean {
  * race. Anything else has to keep propagating.
  */
 export function isUniqueViolationOn(error: unknown, constraint: string): boolean {
+  const databaseError = findDatabaseError(error);
   return (
-    isDatabaseError(error) && error.code === SQLSTATE.UNIQUE_VIOLATION && error.constraint === constraint
+    databaseError?.code === SQLSTATE.UNIQUE_VIOLATION && databaseError.constraint === constraint
   );
 }

@@ -29,6 +29,27 @@
       "when": 1785409216529,
       "tag": "0003_invariants",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785420014511,
+      "tag": "0004_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785420029430,
+      "tag": "0005_auth_privileges",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785420031234,
+      "tag": "0006_row_level_security",
+      "breakpoints": true
     }
   ]
 }

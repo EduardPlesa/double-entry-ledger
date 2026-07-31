@@ -7,12 +7,19 @@ import {
   AccountNotFoundError,
   AccountNotInBookError,
   BookNotFoundError,
+  EntryAlreadyReversedError,
+  EntryNotFoundError,
   CurrencyMismatchError,
   type CurrencyImbalance,
   UnbalancedEntryError,
   ValidationError,
 } from '../domain/errors.js';
-import type { AccountRecord, EntryRecord, LedgerRepository } from '../repositories/ledger.repository.js';
+import type {
+  AccountRecord,
+  EntryRecord,
+  LedgerRepository,
+  PostingLine,
+} from '../repositories/ledger.repository.js';
 import { decodePostingCursor, encodePostingCursor } from './cursor.js';
 
 /**
@@ -75,6 +82,64 @@ const listPostingsOptionsSchema = z.object({
 
 export type ListPostingsOptions = z.input<typeof listPostingsOptionsSchema>;
 
+/**
+ * The five account types of double-entry bookkeeping, matching the Postgres enum. Fixed by
+ * accounting rather than by product requirements - there will never be a sixth.
+ */
+const createAccountSchema = z.object({
+  name: z.string().trim().min(1, 'must not be blank').max(200),
+  type: z.enum(['asset', 'liability', 'equity', 'revenue', 'expense']),
+  currency: z.string().regex(CURRENCY_RE, 'must be a three-letter ISO 4217 code, such as EUR'),
+  parentId: z.uuid('must be a UUID').nullish(),
+});
+
+export type CreateAccountInput = z.input<typeof createAccountSchema>;
+
+/**
+ * Everything about a reversal is optional. The legs are determined by the original - that is
+ * what makes it a reversal rather than a new entry that happens to look like one.
+ */
+const reverseEntryInputSchema = z.object({
+  occurredAt: z.coerce.date().optional(),
+  description: z.string().trim().min(1, 'must not be blank').max(1000).optional(),
+  externalId: z.string().trim().min(1, 'must not be blank').max(255).nullish(),
+});
+
+export type ReverseEntryInput = z.input<typeof reverseEntryInputSchema>;
+
+/**
+ * Who recorded an entry. Exactly one is set for anything written through the API; both are
+ * null for the rows stages 1 and 2 wrote before either table existed, and history cannot be
+ * backfilled.
+ */
+export interface Authorship {
+  readonly createdByUserId?: string | null;
+  readonly createdByApiKeyId?: string | null;
+}
+
+export interface TrialBalanceLine {
+  readonly accountId: string;
+  readonly name: string;
+  readonly type: AccountRecord['type'];
+  readonly currency: string;
+  readonly balance: Money;
+}
+
+export interface TrialBalanceTotal {
+  readonly currency: string;
+  readonly debits: Money;
+  readonly credits: Money;
+  readonly balanced: boolean;
+}
+
+export interface TrialBalanceResult {
+  readonly bookId: string;
+  readonly asOf: Date | null;
+  readonly accounts: readonly TrialBalanceLine[];
+  readonly totals: readonly TrialBalanceTotal[];
+  readonly balanced: boolean;
+}
+
 export interface PostEntryResult {
   readonly entry: EntryRecord;
   /**
@@ -135,6 +200,44 @@ export class LedgerService {
   }
 
   /**
+   * Creates an account in a book.
+   *
+   * Inside a book-scoped transaction, so the policy's WITH CHECK is what physically prevents
+   * an account being written into a book the caller is not scoped to - the `bookId` here
+   * comes from the authorize guard, and the database refuses anything else.
+   *
+   * A parent in another book is rejected by the composite foreign key, and is invisible under
+   * the policy anyway; a parent that does not exist comes back as a foreign key violation.
+   * Both are the database's job, not a pre-flight query's.
+   */
+  async createAccount(bookId: string, input: CreateAccountInput): Promise<AccountRecord> {
+    const parsed = parseInput(createAccountSchema, input, 'account');
+
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      if (parsed.parentId !== null && parsed.parentId !== undefined) {
+        const parent = await this.repository.findAccountById(tx, parsed.parentId);
+        if (parent === null) throw new AccountNotFoundError([parsed.parentId]);
+
+        // Not a database constraint, and could not easily be one: a currency mismatch between
+        // parent and child is representable and would produce a tree whose subtotals cannot
+        // be added up. Rejected here, where the message can say so.
+        if (parent.currency !== parsed.currency) {
+          throw new CurrencyMismatchError(parsed.parentId, parent.currency, parsed.currency);
+        }
+      }
+
+      return this.repository.insertAccount(tx, {
+        id: this.newId(),
+        bookId,
+        name: parsed.name,
+        type: parsed.type,
+        currency: parsed.currency,
+        parentId: parsed.parentId ?? null,
+      });
+    });
+  }
+
+  /**
    * Records an entry, or returns the one already recorded under the same `externalId`.
    *
    * The order of operations is the design:
@@ -151,54 +254,61 @@ export class LedgerService {
    * makes the invariant true of every writer, including psql and including a future version
    * of this method with a bug in it.
    */
-  async postEntry(bookId: string, input: PostEntryInput): Promise<PostEntryResult> {
+  async postEntry(
+    bookId: string,
+    input: PostEntryInput,
+    author: Authorship = {},
+  ): Promise<PostEntryResult> {
     const parsed = parseInput(postEntryInputSchema, input, 'entry');
     const legs = toLegs(parsed.legs);
     assertBalanced(legs);
 
     const externalId = parsed.externalId ?? null;
-
-    if (externalId !== null) {
-      const existing = await this.repository.findEntryByExternalId(
-        this.unitOfWork.executor,
-        bookId,
-        externalId,
-      );
-      if (existing !== null) return { entry: existing, created: false };
-    }
-
     const recordedAt = this.clock.now();
     const entryId = this.newId();
 
     try {
-      const entry = await this.unitOfWork.transaction(async (tx) => {
+      return await this.unitOfWork.transactionInBook(bookId, async (tx) => {
+        // The idempotency read moved inside the transaction when row-level security arrived:
+        // `entries` is behind a policy keyed on `app.current_book_id`, and that setting only
+        // exists within a transaction that established it. Reading it here rather than
+        // beforehand also narrows the window the race below has to lose.
+        if (externalId !== null) {
+          const existing = await this.repository.findEntryByExternalId(tx, bookId, externalId);
+          if (existing !== null) return { entry: existing, created: false };
+        }
+
         await this.assertPostable(tx, bookId, legs);
 
-        return this.repository.insertEntry(tx, {
+        const entry = await this.repository.insertEntry(tx, {
           id: entryId,
           bookId,
           occurredAt: parsed.occurredAt,
           recordedAt,
           description: parsed.description,
           externalId,
+          createdByUserId: author.createdByUserId ?? null,
+          createdByApiKeyId: author.createdByApiKeyId ?? null,
           legs: legs.map((leg) => ({
             accountId: leg.accountId,
             amountMinor: leg.amount.amountMinor,
             currency: leg.amount.currency,
           })),
         });
-      });
 
-      return { entry, created: true };
+        return { entry, created: true };
+      });
     } catch (error) {
       // Two callers posted the same external_id at once and this one lost. The winner's
       // entry is the answer - the whole promise of idempotency is that the loser gets it
       // too, rather than a 409 for an operation that did in fact happen.
+      //
+      // A second transaction, because the one that raised is aborted and cannot be read
+      // from. It is book-scoped like the first: the policy does not care that this read is
+      // recovering from an error.
       if (externalId !== null && isUniqueViolationOn(error, EXTERNAL_ID_INDEX)) {
-        const existing = await this.repository.findEntryByExternalId(
-          this.unitOfWork.executor,
-          bookId,
-          externalId,
+        const existing = await this.unitOfWork.transactionInBook(bookId, (tx) =>
+          this.repository.findEntryByExternalId(tx, bookId, externalId),
         );
         if (existing !== null) return { entry: existing, created: false };
       }
@@ -214,6 +324,126 @@ export class LedgerService {
   }
 
   /**
+   * Reverses an entry by recording a new one with every leg negated.
+   *
+   * This is the only correction mechanism the system has, and it is a consequence of invariant
+   * 2 rather than a policy choice: entries and postings cannot be updated or deleted by any
+   * role, so an error in the record is fixed by adding to the record, never by rewriting it.
+   * The original stays exactly as it was, and both entries remain visible - which is the
+   * behaviour an auditor expects and the reason the trial balance still adds up afterwards.
+   *
+   * A reversal is itself an ordinary entry, so reversing one is permitted. What is not is
+   * reversing the same entry twice, which would double the correction.
+   */
+  async reverseEntry(
+    bookId: string,
+    entryId: string,
+    input: ReverseEntryInput = {},
+    author: Authorship = {},
+  ): Promise<EntryRecord> {
+    const parsed = parseInput(reverseEntryInputSchema, input, 'reversal');
+    const recordedAt = this.clock.now();
+
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const original = await this.repository.findEntryById(tx, entryId);
+
+      // Under row-level security an entry in another book is not visible, so this covers both
+      // "no such entry" and "not yours" - and answers the same way for each, which is the
+      // point.
+      if (original === null) throw new EntryNotFoundError(entryId);
+
+      const existing = await this.repository.findReversalOf(tx, entryId);
+      if (existing !== null) throw new EntryAlreadyReversedError(entryId, existing.id);
+
+      return this.repository.insertEntry(tx, {
+        id: this.newId(),
+        bookId,
+
+        // When the correction happens, not when the original did. Backdating a reversal to
+        // the original's date would make a balance that was correct as of last March silently
+        // change, and "what did we believe on the 31st" would stop having an answer.
+        occurredAt: parsed.occurredAt ?? recordedAt,
+        recordedAt,
+        description: parsed.description ?? `Reversal of: ${original.description}`,
+
+        // Deliberately not inherited. `external_id` is unique per book, so copying the
+        // original's would collide, and a reversal is a different event that deserves its own
+        // idempotency key or none at all.
+        externalId: parsed.externalId ?? null,
+
+        reversalOf: entryId,
+        createdByUserId: author.createdByUserId ?? null,
+        createdByApiKeyId: author.createdByApiKeyId ?? null,
+
+        legs: original.postings.map((posting) => ({
+          accountId: posting.accountId,
+          amountMinor: -posting.amountMinor,
+          currency: posting.currency,
+        })),
+      });
+    });
+  }
+
+  /**
+   * The trial balance: every account with its balance, and the proof that the book adds up.
+   *
+   * The totals are per currency, not per book. A book's `base_currency` is a default for
+   * reporting, not a claim that everything in it is denominated that way, and adding a EUR
+   * balance to a USD one produces a number that means nothing. Each currency balances on its
+   * own or the book is broken, which is the same rule the zero-sum invariant applies to a
+   * single entry.
+   *
+   * Debits and credits are the positive and negative balances stated separately. In a system
+   * that stores signed amounts they carry no information the sum does not - `balanced` is
+   * exactly `debits === credits` is exactly `sum === 0` - but they are how the report is read,
+   * and a trial balance that made an accountant do the arithmetic would be an odd thing to
+   * ship.
+   */
+  async trialBalance(bookId: string, asOf?: Date | undefined): Promise<TrialBalanceResult> {
+    const rows = await this.unitOfWork.transactionInBook(bookId, (tx) =>
+      this.repository.trialBalance(tx, bookId, asOf),
+    );
+
+    const accounts = rows.map((row) => ({
+      accountId: row.accountId,
+      name: row.name,
+      type: row.type,
+      currency: row.currency,
+      balance: money(row.balanceMinor, row.currency),
+    }));
+
+    const byCurrency = new Map<string, { debits: bigint; credits: bigint }>();
+    for (const row of rows) {
+      const totals = byCurrency.get(row.currency) ?? { debits: 0n, credits: 0n };
+
+      if (row.balanceMinor > 0n) totals.debits += row.balanceMinor;
+      else totals.credits += -row.balanceMinor;
+
+      byCurrency.set(row.currency, totals);
+    }
+
+    const totals = [...byCurrency]
+      .map(([currency, { debits, credits }]) => ({
+        currency,
+        debits: money(debits, currency),
+        credits: money(credits, currency),
+        balanced: debits === credits,
+      }))
+      .sort((a, b) => a.currency.localeCompare(b.currency));
+
+    return {
+      bookId,
+      asOf: asOf ?? null,
+      accounts,
+      totals,
+      // The assertion the report exists to make. False here means the database has been
+      // written to by something that bypassed the deferred constraint trigger, which should
+      // be impossible - so it is worth stating rather than assuming.
+      balanced: totals.every((total) => total.balanced),
+    };
+  }
+
+  /**
    * The balance of an account, derived - always - by summing its postings.
    *
    * `asOf` is a point in *occurred* time, so a backdated entry changes the answer to a
@@ -221,11 +451,13 @@ export class LedgerService {
    * stage 7's checkpoints are keyed on posting id: a date-keyed cache would be silently
    * invalidated by exactly this.
    */
-  async getBalance(accountId: string, asOf?: Date | undefined): Promise<BalanceResult> {
-    const account = await this.requireAccount(accountId);
-    const total = await this.repository.sumPostings(this.unitOfWork.executor, accountId, asOf);
+  async getBalance(bookId: string, accountId: string, asOf?: Date | undefined): Promise<BalanceResult> {
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const account = await this.requireAccount(tx, accountId);
+      const total = await this.repository.sumPostings(tx, accountId, asOf);
 
-    return { accountId, asOf: asOf ?? null, balance: money(total, account.currency) };
+      return { accountId, asOf: asOf ?? null, balance: money(total, account.currency) };
+    });
   }
 
   /**
@@ -241,51 +473,43 @@ export class LedgerService {
    * `postings` makes any other combination unrepresentable - so a single running total is
    * well defined here in a way it would not be for a book.
    */
-  async listPostings(accountId: string, options: ListPostingsOptions = {}): Promise<PostingPage> {
+  async listPostings(
+    bookId: string,
+    accountId: string,
+    options: ListPostingsOptions = {},
+  ): Promise<PostingPage> {
     const { cursor, limit } = parseInput(listPostingsOptionsSchema, options, 'pagination options');
-    const account = await this.requireAccount(accountId);
     const afterId = cursor === undefined ? undefined : decodePostingCursor(cursor);
 
-    const opening =
-      afterId === undefined
-        ? 0n
-        : await this.repository.sumPostingsThrough(this.unitOfWork.executor, accountId, afterId);
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const account = await this.requireAccount(tx, accountId);
 
-    // One row more than asked for: the cheapest way to know whether a next page exists
-    // without a second count query, and the extra row is discarded.
-    const rows = await this.repository.listPostings(this.unitOfWork.executor, accountId, {
-      afterId,
-      limit: limit + 1,
+      const opening =
+        afterId === undefined
+          ? 0n
+          : await this.repository.sumPostingsThrough(tx, accountId, afterId);
+
+      // One row more than asked for: the cheapest way to know whether a next page exists
+      // without a second count query, and the extra row is discarded.
+      const rows = await this.repository.listPostings(tx, accountId, {
+        afterId,
+        limit: limit + 1,
+      });
+
+      return buildPostingPage({ accountId, currency: account.currency, rows, limit, opening });
     });
-
-    const page = rows.slice(0, limit);
-    const hasMore = rows.length > limit;
-
-    let running = opening;
-    const items = page.map((row) => {
-      running += row.amountMinor;
-      return {
-        id: row.id,
-        entryId: row.entryId,
-        occurredAt: row.occurredAt,
-        recordedAt: row.recordedAt,
-        description: row.description,
-        amount: money(row.amountMinor, row.currency),
-        runningBalance: money(running, account.currency),
-      };
-    });
-
-    const last = page.at(-1);
-
-    return {
-      accountId,
-      items,
-      nextCursor: hasMore && last !== undefined ? encodePostingCursor(last.id) : null,
-    };
   }
 
-  private async requireAccount(accountId: string): Promise<AccountRecord> {
-    const account = await this.repository.findAccountById(this.unitOfWork.executor, accountId);
+  /**
+   * The account, or a not-found error.
+   *
+   * Under row-level security an account belonging to a different book is not visible at all,
+   * so this raises `AccountNotFoundError` for it rather than `AccountNotInBookError`. That is
+   * the answer the caller should get anyway: confirming that an account exists somewhere else
+   * tells someone with an id something they have not been authorised to learn.
+   */
+  private async requireAccount(tx: Executor, accountId: string): Promise<AccountRecord> {
+    const account = await this.repository.findAccountById(tx, accountId);
     if (account === null) throw new AccountNotFoundError([accountId]);
     return account;
   }
@@ -323,6 +547,46 @@ export class LedgerService {
       }
     }
   }
+}
+
+/**
+ * Rows plus an opening balance become a page with a running balance.
+ *
+ * Extracted from `listPostings` so that the method reads as the four database calls it makes
+ * and this reads as the arithmetic it is. Nothing here touches the database, which is also
+ * what makes the off-by-one in the `limit + 1` trick reviewable in one place.
+ */
+function buildPostingPage(input: {
+  accountId: string;
+  currency: string;
+  rows: readonly PostingLine[];
+  limit: number;
+  opening: bigint;
+}): PostingPage {
+  const page = input.rows.slice(0, input.limit);
+  const hasMore = input.rows.length > input.limit;
+
+  let running = input.opening;
+  const items = page.map((row) => {
+    running += row.amountMinor;
+    return {
+      id: row.id,
+      entryId: row.entryId,
+      occurredAt: row.occurredAt,
+      recordedAt: row.recordedAt,
+      description: row.description,
+      amount: money(row.amountMinor, row.currency),
+      runningBalance: money(running, input.currency),
+    };
+  });
+
+  const last = page.at(-1);
+
+  return {
+    accountId: input.accountId,
+    items,
+    nextCursor: hasMore && last !== undefined ? encodePostingCursor(last.id) : null,
+  };
 }
 
 function parseInput<T extends z.ZodType>(schema: T, input: unknown, subject: string): z.output<T> {

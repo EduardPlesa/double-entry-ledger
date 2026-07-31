@@ -10,8 +10,35 @@
  * `code` is a stable machine-readable string. Callers, tests and eventually clients branch
  * on it; the message is for humans and is free to change.
  */
+/**
+ * Every code a domain error can carry.
+ *
+ * A union rather than a loose string, and the reason is one line in `error-middleware.ts`:
+ * the status map is typed `Record<DomainErrorCode, ...>`, so adding an error here without
+ * deciding what it means over HTTP fails the build rather than falling through to a 500 on
+ * the day it is first thrown. That is the compile-time version of the route meta-test.
+ */
+export type DomainErrorCode =
+  | 'VALIDATION_FAILED'
+  | 'ENTRY_UNBALANCED'
+  | 'BOOK_NOT_FOUND'
+  | 'ACCOUNT_NOT_FOUND'
+  | 'ACCOUNT_NOT_IN_BOOK'
+  | 'ACCOUNT_CLOSED'
+  | 'CURRENCY_MISMATCH'
+  | 'INVALID_CURSOR'
+  | 'UNAUTHENTICATED'
+  | 'FORBIDDEN'
+  | 'ENTRY_NOT_FOUND'
+  | 'ENTRY_ALREADY_REVERSED'
+  | 'EMAIL_ALREADY_REGISTERED'
+  | 'USER_NOT_FOUND'
+  | 'IDEMPOTENCY_KEY_IN_FLIGHT'
+  | 'IDEMPOTENCY_KEY_REUSED'
+  | 'API_KEY_NOT_PERMITTED';
+
 export abstract class DomainError extends Error {
-  abstract readonly code: string;
+  abstract readonly code: DomainErrorCode;
 
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -137,5 +164,116 @@ export class InvalidCursorError extends DomainError {
 
   constructor(readonly cursor: string) {
     super(`cursor ${JSON.stringify(cursor)} is not a cursor this endpoint issued`);
+  }
+}
+
+/**
+ * No usable credential: absent, malformed, expired, revoked, or signed by something else.
+ *
+ * Deliberately one error for all of those. The `reason` is for the log, never for the
+ * response - telling a caller that their token was well-formed but expired, rather than
+ * simply invalid, is free information about how close they got.
+ */
+export class UnauthenticatedError extends DomainError {
+  readonly code = 'UNAUTHENTICATED';
+
+  constructor(readonly reason: string) {
+    super('authentication is required');
+  }
+}
+
+/**
+ * Authenticated, a member of this book, and the role does not carry the permission.
+ *
+ * Not the error for "not a member of this book" - that is a `BookNotFoundError`, because a
+ * 403 to a non-member turns book membership into something anyone holding an id can
+ * enumerate.
+ */
+export class ForbiddenError extends DomainError {
+  readonly code = 'FORBIDDEN';
+
+  constructor(
+    readonly permission: string,
+    readonly role: string,
+  ) {
+    super(`the ${role} role does not carry ${permission}`);
+  }
+}
+
+/**
+ * An operation a machine client cannot perform, however privileged its key.
+ *
+ * Creating a book is the case that exists: an API key is scoped to exactly one book, so a key
+ * creating a second one would either escape its own scope or produce a book it cannot reach.
+ * Neither is a permission question, which is why this is not a ForbiddenError - no role would
+ * make it possible.
+ */
+export class ApiKeyNotPermittedError extends DomainError {
+  readonly code = 'API_KEY_NOT_PERMITTED';
+
+  constructor(readonly operation: string) {
+    super(`${operation} requires a user session; an API key is scoped to one book`);
+  }
+}
+
+export class EntryNotFoundError extends DomainError {
+  readonly code = 'ENTRY_NOT_FOUND';
+
+  constructor(readonly entryId: string) {
+    super(`entry ${entryId} does not exist`);
+  }
+}
+
+/**
+ * An entry may be reversed at most once. Stage 4 makes this a partial unique index on
+ * `reversal_of`; until then the service checks it, and the error is the same either way.
+ */
+export class EntryAlreadyReversedError extends DomainError {
+  readonly code = 'ENTRY_ALREADY_REVERSED';
+
+  constructor(
+    readonly entryId: string,
+    readonly reversalId: string,
+  ) {
+    super(`entry ${entryId} was already reversed by entry ${reversalId}`);
+  }
+}
+
+export class EmailAlreadyRegisteredError extends DomainError {
+  readonly code = 'EMAIL_ALREADY_REGISTERED';
+
+  constructor(readonly email: string) {
+    super(`${email} is already registered`);
+  }
+}
+
+export class UserNotFoundError extends DomainError {
+  readonly code = 'USER_NOT_FOUND';
+
+  constructor(readonly userId: string) {
+    super(`user ${userId} does not exist`);
+  }
+}
+
+/** A request with this idempotency key is still running. Retry when it has finished. */
+export class IdempotencyKeyInFlightError extends DomainError {
+  readonly code = 'IDEMPOTENCY_KEY_IN_FLIGHT';
+
+  constructor(readonly key: string) {
+    super(`a request with idempotency key ${JSON.stringify(key)} is still in flight`);
+  }
+}
+
+/**
+ * The same idempotency key, a different request body.
+ *
+ * Replaying the first response here would hide a client bug behind a plausible answer: the
+ * caller believes they sent the second request and would be handed the result of the first.
+ */
+export class IdempotencyKeyReusedError extends DomainError {
+  readonly code = 'IDEMPOTENCY_KEY_REUSED';
+
+  constructor(readonly key: string) {
+    super(`idempotency key ${JSON.stringify(key)} was already used for a different request`);
   }
 }
