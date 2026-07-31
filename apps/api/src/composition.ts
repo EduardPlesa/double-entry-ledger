@@ -8,10 +8,14 @@ import { type Config, getConfig } from './config.js';
 import { DrizzleUnitOfWork, createDatabase, createPool, type Database } from './db/client.js';
 import { createApp } from './http/app.js';
 import { createLogger } from './http/logger.js';
+import { createGuards } from './middleware/authorize.js';
 import { DrizzleAuthRepository } from './repositories/auth.repository.js';
+import { DrizzleMembershipRepository } from './repositories/membership.repository.js';
 import { DrizzleLedgerRepository } from './repositories/ledger.repository.js';
-import { allRoutes, guardsFor } from './routes/index.js';
+import { allRoutes } from './routes/index.js';
+import { AccessService } from './services/access.service.js';
 import { AuthService } from './services/auth.service.js';
+import { BookService } from './services/book.service.js';
 import { LedgerService } from './services/ledger.service.js';
 
 /**
@@ -31,6 +35,8 @@ export interface Application {
   readonly logger: Logger;
   readonly ledger: LedgerService;
   readonly auth: AuthService;
+  readonly books: BookService;
+  readonly access: AccessService;
   readonly app: Express;
   close(): Promise<void>;
 }
@@ -58,31 +64,55 @@ export function createApplication(
   const clock = overrides.clock ?? systemClock;
   const logger = overrides.logger ?? createLogger(config);
 
-  const ledger = new LedgerService({
-    repository: new DrizzleLedgerRepository(),
-    unitOfWork,
-    clock,
-    newId,
-  });
+  const ledgerRepository = new DrizzleLedgerRepository();
+  const membershipRepository = new DrizzleMembershipRepository();
+  const authRepository = new DrizzleAuthRepository();
 
   // The auth primitives are built here for the same reason everything else is: they read
   // configuration, and this is the one module allowed to. The clock goes into the token
   // issuer as well as the ledger service, so expiry is a value a test can move rather than a
   // race against the wall clock.
+  const tokens = accessTokens({ config: config.auth, clock, newId });
+
+  const ledger = new LedgerService({
+    repository: ledgerRepository,
+    unitOfWork,
+    clock,
+    newId,
+  });
+
   const auth = new AuthService({
-    repository: new DrizzleAuthRepository(),
+    repository: authRepository,
     unitOfWork,
     passwordHasher: argon2idHasher(config.auth.argon2),
-    accessTokens: accessTokens({ config: config.auth, clock, newId }),
+    accessTokens: tokens,
     refreshTokens: refreshTokens(config.auth.refreshTokenPepper),
     clock,
     newId,
     refreshTokenTtlSeconds: config.auth.refreshTokenTtlSeconds,
   });
 
+  const books = new BookService({
+    ledgerRepository,
+    membershipRepository,
+    authRepository,
+    unitOfWork,
+    clock,
+    newId,
+    apiKeyEnvironment: config.apiKeyEnvironment,
+  });
+
+  const access = new AccessService({
+    membershipRepository,
+    ledgerRepository,
+    unitOfWork,
+    accessTokens: tokens,
+    clock,
+  });
+
   const app = createApp({
-    definitions: allRoutes({ auth }),
-    guards: guardsFor,
+    definitions: allRoutes({ auth, books, ledger }),
+    guards: createGuards({ access }),
     logger,
   });
 
@@ -93,6 +123,8 @@ export function createApplication(
     logger,
     ledger,
     auth,
+    books,
+    access,
     app,
 
     close: async () => {

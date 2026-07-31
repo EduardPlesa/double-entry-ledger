@@ -68,8 +68,26 @@ export interface PostingLine {
   readonly description: string;
 }
 
+export interface BookRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly baseCurrency: string;
+  readonly createdAt: Date;
+}
+
+export interface NewAccount {
+  readonly id: string;
+  readonly bookId: string;
+  readonly name: string;
+  readonly type: AccountRecord['type'];
+  readonly currency: string;
+  readonly parentId: string | null;
+}
+
 export interface LedgerRepository {
   bookExists(executor: Executor, bookId: string): Promise<boolean>;
+  insertBook(executor: Executor, book: BookRecord): Promise<BookRecord>;
+  insertAccount(executor: Executor, account: NewAccount): Promise<AccountRecord>;
   /**
    * The book an account belongs to, or null. Readable without a book context, which is the
    * only reason it can be the first step of establishing one.
@@ -99,6 +117,35 @@ export class DrizzleLedgerRepository implements LedgerRepository {
   async bookExists(executor: Executor, bookId: string): Promise<boolean> {
     const rows = await executor.select({ id: books.id }).from(books).where(eq(books.id, bookId)).limit(1);
     return rows.length > 0;
+  }
+
+  /**
+   * `books` has no row-level security policy, so this works outside a book context - which it
+   * has to, since the book does not exist yet and cannot be the current one.
+   */
+  async insertBook(executor: Executor, book: BookRecord): Promise<BookRecord> {
+    const [inserted] = await executor.insert(books).values(book).returning();
+    if (inserted === undefined) throw new Error(`insert of book ${book.id} returned no row`);
+    return inserted;
+  }
+
+  /**
+   * `accounts` does have a policy, so this must run inside a transaction with the book
+   * context set - and the WITH CHECK clause is what stops a caller scoped to one book from
+   * writing an account into another.
+   */
+  async insertAccount(executor: Executor, account: NewAccount): Promise<AccountRecord> {
+    const [inserted] = await executor.insert(accounts).values(account).returning({
+      id: accounts.id,
+      bookId: accounts.bookId,
+      name: accounts.name,
+      type: accounts.type,
+      currency: accounts.currency,
+      closedAt: accounts.closedAt,
+    });
+
+    if (inserted === undefined) throw new Error(`insert of account ${account.id} returned no row`);
+    return inserted;
   }
 
   /**

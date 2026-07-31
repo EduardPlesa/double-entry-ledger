@@ -40,6 +40,30 @@ export function parseOrThrow<T extends z.ZodType>(
  */
 export const uuidParam = z.uuid('must be a UUID');
 
+/**
+ * A UUID path parameter, or a 400.
+ *
+ * Express 5 types `req.params` values as `string | string[]`, because a wildcard segment can
+ * match repeatedly. Every parameter in this application is a single segment, so anything
+ * arriving as an array is malformed by definition and the schema rejects it along with the
+ * rest.
+ *
+ * Both the authorize guard and the handlers behind it read parameters through here, so the
+ * value a handler sees has been through exactly the same check as the value the guard
+ * resolved a book from - rather than two parses that could drift apart.
+ */
+export function uuidPathParam(params: Record<string, unknown>, name: string): string {
+  const parsed = uuidParam.safeParse(params[name]);
+
+  if (!parsed.success) {
+    throw new ValidationError(`invalid request path: ${name} must be a UUID`, [
+      { path: name, message: 'must be a UUID' },
+    ]);
+  }
+
+  return parsed.data;
+}
+
 export const paginationQuery = z.object({
   cursor: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),

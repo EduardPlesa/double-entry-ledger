@@ -29,7 +29,7 @@ afterAll(async () => {
   await application.close();
 });
 
-const definitions = () => allRoutes({ auth: application.auth });
+const definitions = () => allRoutes({ auth: application.auth, books: application.books, ledger: application.ledger });
 
 describe('the registered routes', () => {
   it('match the registry exactly, in both directions', () => {
