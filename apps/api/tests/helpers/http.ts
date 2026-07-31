@@ -1,7 +1,7 @@
 import type { Express, RequestHandler } from 'express';
 import { pino } from 'pino';
 import { createApp } from '../../src/http/app.js';
-import type { RouteAccess, RouteDefinition } from '../../src/routes/registry.js';
+import type { RouteDefinition } from '../../src/routes/registry.js';
 
 /**
  * An app with whatever routes a test wants, and nothing it does not.
@@ -17,11 +17,11 @@ export function testLogger() {
 }
 
 /** Guards that permit everything. The access requirement is enforced in its own tests. */
-export const permissiveGuards = (_access: RouteAccess): readonly RequestHandler[] => [];
+export const permissiveGuards = (_definition: RouteDefinition): readonly RequestHandler[] => [];
 
 export interface TestAppOptions {
   readonly definitions: readonly RouteDefinition[];
-  readonly guards?: (access: RouteAccess) => readonly RequestHandler[];
+  readonly guards?: (definition: RouteDefinition) => readonly RequestHandler[];
   readonly exposeInternalErrors?: boolean;
   /**
    * Routes registered directly on the app, behind the registry's back.

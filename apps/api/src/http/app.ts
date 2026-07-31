@@ -2,7 +2,7 @@ import { newId } from '@ledger/shared';
 import cookieParser from 'cookie-parser';
 import express, { type Express, type RequestHandler } from 'express';
 import type { Logger } from 'pino';
-import type { RouteAccess, RouteDefinition } from '../routes/registry.js';
+import type { RouteDefinition } from '../routes/registry.js';
 import { errorMiddleware } from './error-middleware.js';
 import { httpLogger } from './logger.js';
 import { PROBLEM_CONTENT_TYPE, problem } from './problem.js';
@@ -23,14 +23,18 @@ export interface AppDependencies {
   readonly definitions: readonly RouteDefinition[];
 
   /**
-   * The middleware that enforces a route's access requirement.
+   * The middleware in front of a route: authentication, authorization, and idempotency.
    *
    * Passed in rather than imported, and this is the seam the whole registry rests on:
    * `app.ts` knows that every route has an `access` and that something must enforce it, and
-   * knows nothing about tokens, roles or books. Authentication and authorization are wired
-   * here, once, for every route in the table - there is no per-route opportunity to forget.
+   * knows nothing about tokens, roles or books. It is applied here, once, for every route in
+   * the table - there is no per-route opportunity to forget.
+   *
+   * It takes the whole definition rather than just the access, because whether a route
+   * honours `Idempotency-Key` is derived from its method and its scope, and deriving it is
+   * what stops it from being a flag someone sets wrong.
    */
-  readonly guards: (access: RouteAccess) => readonly RequestHandler[];
+  readonly guards: (definition: RouteDefinition) => readonly RequestHandler[];
 
   readonly logger: Logger;
   readonly exposeInternalErrors?: boolean;
@@ -68,7 +72,7 @@ export function createApp(dependencies: AppDependencies): Express {
   app.use(cookieParser());
 
   for (const definition of dependencies.definitions) {
-    app[definition.method](definition.path, ...dependencies.guards(definition.access), definition.handler);
+    app[definition.method](definition.path, ...dependencies.guards(definition), definition.handler);
   }
 
   // Unmatched paths, as a problem document like everything else. Without this, Express's

@@ -1,5 +1,6 @@
 import type { RequestHandler } from 'express';
 import { bookAccessOf } from '../http/context.js';
+import { recordIdempotentEntry } from '../middleware/idempotency.js';
 import { serializeBalance, serializeEntry, serializePostingPage } from '../http/serialize.js';
 import { isoDateTimeQuery, paginationQuery, parseOrThrow, uuidPathParam } from '../http/validate.js';
 import type { LedgerService } from '../services/ledger.service.js';
@@ -41,6 +42,10 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
   const postEntry: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
     const { entry, created } = await ledger.postEntry(bookId, request.body);
+
+    // Told to the idempotency middleware explicitly rather than sniffed out of the response
+    // body, so the audit trail links an HTTP retry to the entry it produced.
+    recordIdempotentEntry(response, entry.id);
 
     // 201 for a create, 200 for a replay of one that already existed under the same
     // external_id. Both return the same entry, which is what makes a retry after a timeout

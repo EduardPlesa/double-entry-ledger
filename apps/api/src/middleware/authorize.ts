@@ -2,7 +2,7 @@ import type { RequestHandler } from 'express';
 import { setBookAccess, setPrincipal, principalOf } from '../http/context.js';
 import { uuidPathParam } from '../http/validate.js';
 import type { AccessService } from '../services/access.service.js';
-import type { BookSource, RouteAccess } from '../routes/registry.js';
+import { acceptsIdempotencyKey, type BookSource, type RouteAccess, type RouteDefinition } from '../routes/registry.js';
 
 /**
  * The guards, and the only place a route's access requirement is enforced.
@@ -19,6 +19,8 @@ import type { BookSource, RouteAccess } from '../routes/registry.js';
 
 export interface GuardDependencies {
   readonly access: AccessService;
+  /** Applied to the POST routes that are scoped to a book. See `acceptsIdempotencyKey`. */
+  readonly idempotency: RequestHandler;
 }
 
 export function createGuards(dependencies: GuardDependencies) {
@@ -39,15 +41,25 @@ export function createGuards(dependencies: GuardDependencies) {
     };
   };
 
-  return function guardsFor(routeAccess: RouteAccess): readonly RequestHandler[] {
+  return function guardsFor(definition: RouteDefinition): readonly RequestHandler[] {
+    const routeAccess = definition.access;
+
     switch (routeAccess.kind) {
       case 'public':
         return [];
       case 'authenticated':
         return [authenticate];
-      case 'book':
-        // Order matters and is not negotiable: authorization needs a principal to authorize.
-        return [authenticate, authorize(routeAccess)];
+      case 'book': {
+        // The order is not negotiable. Authorization needs a principal to authorize, and
+        // idempotency needs the book that authorization resolved - the reservation table is
+        // keyed on it, and reserving under an unauthorised book would let a caller occupy a
+        // key in a book they cannot reach.
+        const chain = [authenticate, authorize(routeAccess)];
+
+        return acceptsIdempotencyKey(definition)
+          ? [...chain, dependencies.idempotency]
+          : chain;
+      }
     }
   };
 }
