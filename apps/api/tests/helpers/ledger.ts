@@ -179,6 +179,25 @@ export async function withBookClient<T>(
   });
 }
 
+/**
+ * One query against the book-scoped tables, with the context set.
+ *
+ * This exists because the mistake it prevents has now been made three times in three
+ * different test files, and it never looks like a mistake: `pool.query` against `accounts`,
+ * `entries` or `postings` without a book context returns zero rows rather than raising, so
+ * the assertion downstream fails with "expected 1, got 0" or passes for entirely the wrong
+ * reason. Reaching for this instead of the pool is the whole fix.
+ */
+export async function queryInBook<T extends Record<string, unknown>>(
+  pool: Pool,
+  bookId: string,
+  text: string,
+  params: readonly unknown[] = [],
+): Promise<T[]> {
+  const result = await withBookClient(pool, bookId, (client) => client.query<T>(text, [...params]));
+  return result.rows;
+}
+
 /** Sum of every posting on an account, read as a bigint. */
 export async function balanceOf(pool: Pool, bookId: string, accountId: string): Promise<bigint> {
   return withBookClient(pool, bookId, async (client) => {

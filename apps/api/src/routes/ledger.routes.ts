@@ -1,7 +1,12 @@
 import type { RequestHandler } from 'express';
-import { bookAccessOf } from '../http/context.js';
+import { authorshipOf, bookAccessOf, principalOf } from '../http/context.js';
 import { recordIdempotentEntry } from '../middleware/idempotency.js';
-import { serializeBalance, serializeEntry, serializePostingPage } from '../http/serialize.js';
+import {
+  serializeBalance,
+  serializeEntry,
+  serializePostingPage,
+  serializeTrialBalance,
+} from '../http/serialize.js';
 import { isoDateTimeQuery, paginationQuery, parseOrThrow, uuidPathParam } from '../http/validate.js';
 import type { LedgerService } from '../services/ledger.service.js';
 import type { RouteDefinition } from './registry.js';
@@ -41,7 +46,11 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
 
   const postEntry: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
-    const { entry, created } = await ledger.postEntry(bookId, request.body);
+    const { entry, created } = await ledger.postEntry(
+      bookId,
+      request.body,
+      authorshipOf(principalOf(response)),
+    );
 
     // Told to the idempotency middleware explicitly rather than sniffed out of the response
     // body, so the audit trail links an HTTP retry to the entry it produced.
@@ -83,6 +92,33 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
     response.json(serializePostingPage(page));
   };
 
+  const reverseEntry: RequestHandler = async (request, response) => {
+    const { bookId } = bookAccessOf(response);
+    const entryId = uuidPathParam(request.params, 'entryId');
+
+    const reversal = await ledger.reverseEntry(
+      bookId,
+      entryId,
+      request.body,
+      authorshipOf(principalOf(response)),
+    );
+
+    recordIdempotentEntry(response, reversal.id);
+
+    // 201: a reversal is a new entry with its own id and its own URL, not a modification of
+    // the one it corrects. That is the whole shape of the domain in one status code.
+    response.status(201).location(`/entries/${reversal.id}`).json(serializeEntry(reversal));
+  };
+
+  const trialBalance: RequestHandler = async (request, response) => {
+    const { bookId } = bookAccessOf(response);
+
+    const asOf = parseOrThrow(isoDateTimeQuery, request.query.asOf, 'query');
+    const report = await ledger.trialBalance(bookId, asOf === undefined ? undefined : new Date(asOf));
+
+    response.json(serializeTrialBalance(report));
+  };
+
   return [
     {
       method: 'post',
@@ -111,6 +147,20 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       access: { kind: 'book', permission: 'book:read', bookFrom: 'account' },
       summary: 'One page of an account’s postings, with a running balance',
       handler: listPostings,
+    },
+    {
+      method: 'post',
+      path: '/entries/:entryId/reverse',
+      access: { kind: 'book', permission: 'entry:reverse', bookFrom: 'entry' },
+      summary: 'Reverse an entry by recording its negation',
+      handler: reverseEntry,
+    },
+    {
+      method: 'get',
+      path: '/books/:bookId/trial-balance',
+      access: { kind: 'book', permission: 'book:read', bookFrom: 'param' },
+      summary: 'Every account with its balance, and the proof the book adds up',
+      handler: trialBalance,
     },
   ];
 }
