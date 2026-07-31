@@ -9,7 +9,9 @@ import { DrizzleUnitOfWork, createDatabase, createPool, type Database } from './
 import { createApp } from './http/app.js';
 import { createLogger } from './http/logger.js';
 import { createGuards } from './middleware/authorize.js';
+import { createIdempotency } from './middleware/idempotency.js';
 import { DrizzleAuthRepository } from './repositories/auth.repository.js';
+import { DrizzleIdempotencyRepository } from './repositories/idempotency.repository.js';
 import { DrizzleMembershipRepository } from './repositories/membership.repository.js';
 import { DrizzleLedgerRepository } from './repositories/ledger.repository.js';
 import { allRoutes } from './routes/index.js';
@@ -112,7 +114,14 @@ export function createApplication(
 
   const app = createApp({
     definitions: allRoutes({ auth, books, ledger }),
-    guards: createGuards({ access }),
+    guards: createGuards({
+      access,
+      idempotency: createIdempotency({
+        repository: new DrizzleIdempotencyRepository(),
+        unitOfWork,
+        clock,
+      }),
+    }),
     logger,
   });
 

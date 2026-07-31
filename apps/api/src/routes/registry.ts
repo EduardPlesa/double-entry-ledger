@@ -49,12 +49,15 @@ export interface RouteDefinition {
 }
 
 /**
- * Whether a route writes, for the idempotency middleware.
+ * Whether a route honours `Idempotency-Key`.
  *
- * Derived rather than declared: `Idempotency-Key` protects against a retried write, and a
- * GET is already idempotent by definition. A flag per route would be a flag someone sets
- * wrong.
+ * Derived rather than declared, so it cannot be set wrong on a route. Two conditions: it must
+ * be a POST, since a GET is already idempotent and a key on one would be a promise about
+ * something that needs no promise; and it must be book-scoped, because the reservation table
+ * is keyed on `(book_id, key)` and there is no book to key it on before one exists. That
+ * leaves `POST /books` and the auth endpoints without replay protection, which is the honest
+ * outcome - creating a second book is not the failure mode this header defends against.
  */
 export function acceptsIdempotencyKey(definition: RouteDefinition): boolean {
-  return definition.method === 'post';
+  return definition.method === 'post' && definition.access.kind === 'book';
 }
