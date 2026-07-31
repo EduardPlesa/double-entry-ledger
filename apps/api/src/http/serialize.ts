@@ -1,6 +1,6 @@
 import { formatMoney, type Money } from '@ledger/shared';
 import type { EntryRecord } from '../repositories/ledger.repository.js';
-import type { BalanceResult, PostingPage } from '../services/ledger.service.js';
+import type { BalanceResult, PostingPage, TrialBalanceResult } from '../services/ledger.service.js';
 
 /**
  * Domain values into JSON.
@@ -76,6 +76,52 @@ export function serializeBalance(result: BalanceResult): BalanceResource {
     asOf: result.asOf?.toISOString() ?? null,
     balance: amount(result.balance),
     currency: result.balance.currency,
+  };
+}
+
+export interface TrialBalanceResource {
+  readonly bookId: string;
+  readonly asOf: string | null;
+  readonly accounts: readonly {
+    readonly accountId: string;
+    readonly name: string;
+    readonly type: string;
+    readonly currency: string;
+    readonly balance: string;
+  }[];
+  readonly totals: readonly {
+    readonly currency: string;
+    readonly debits: string;
+    readonly credits: string;
+    readonly balanced: boolean;
+  }[];
+  readonly balanced: boolean;
+}
+
+/**
+ * Accounts stay in the flat, ordered list the query returned rather than being nested under
+ * their type. The order is by type then name, so a client that wants headings can insert them
+ * while walking the list, and one that wants a table does not have to flatten a shape it
+ * never asked for.
+ */
+export function serializeTrialBalance(result: TrialBalanceResult): TrialBalanceResource {
+  return {
+    bookId: result.bookId,
+    asOf: result.asOf?.toISOString() ?? null,
+    accounts: result.accounts.map((line) => ({
+      accountId: line.accountId,
+      name: line.name,
+      type: line.type,
+      currency: line.currency,
+      balance: amount(line.balance),
+    })),
+    totals: result.totals.map((total) => ({
+      currency: total.currency,
+      debits: amount(total.debits),
+      credits: amount(total.credits),
+      balanced: total.balanced,
+    })),
+    balanced: result.balanced,
   };
 }
 

@@ -7,6 +7,8 @@ import {
   AccountNotFoundError,
   AccountNotInBookError,
   BookNotFoundError,
+  EntryAlreadyReversedError,
+  EntryNotFoundError,
   CurrencyMismatchError,
   type CurrencyImbalance,
   UnbalancedEntryError,
@@ -92,6 +94,51 @@ const createAccountSchema = z.object({
 });
 
 export type CreateAccountInput = z.input<typeof createAccountSchema>;
+
+/**
+ * Everything about a reversal is optional. The legs are determined by the original - that is
+ * what makes it a reversal rather than a new entry that happens to look like one.
+ */
+const reverseEntryInputSchema = z.object({
+  occurredAt: z.coerce.date().optional(),
+  description: z.string().trim().min(1, 'must not be blank').max(1000).optional(),
+  externalId: z.string().trim().min(1, 'must not be blank').max(255).nullish(),
+});
+
+export type ReverseEntryInput = z.input<typeof reverseEntryInputSchema>;
+
+/**
+ * Who recorded an entry. Exactly one is set for anything written through the API; both are
+ * null for the rows stages 1 and 2 wrote before either table existed, and history cannot be
+ * backfilled.
+ */
+export interface Authorship {
+  readonly createdByUserId?: string | null;
+  readonly createdByApiKeyId?: string | null;
+}
+
+export interface TrialBalanceLine {
+  readonly accountId: string;
+  readonly name: string;
+  readonly type: AccountRecord['type'];
+  readonly currency: string;
+  readonly balance: Money;
+}
+
+export interface TrialBalanceTotal {
+  readonly currency: string;
+  readonly debits: Money;
+  readonly credits: Money;
+  readonly balanced: boolean;
+}
+
+export interface TrialBalanceResult {
+  readonly bookId: string;
+  readonly asOf: Date | null;
+  readonly accounts: readonly TrialBalanceLine[];
+  readonly totals: readonly TrialBalanceTotal[];
+  readonly balanced: boolean;
+}
 
 export interface PostEntryResult {
   readonly entry: EntryRecord;
@@ -207,7 +254,11 @@ export class LedgerService {
    * makes the invariant true of every writer, including psql and including a future version
    * of this method with a bug in it.
    */
-  async postEntry(bookId: string, input: PostEntryInput): Promise<PostEntryResult> {
+  async postEntry(
+    bookId: string,
+    input: PostEntryInput,
+    author: Authorship = {},
+  ): Promise<PostEntryResult> {
     const parsed = parseInput(postEntryInputSchema, input, 'entry');
     const legs = toLegs(parsed.legs);
     assertBalanced(legs);
@@ -236,6 +287,8 @@ export class LedgerService {
           recordedAt,
           description: parsed.description,
           externalId,
+          createdByUserId: author.createdByUserId ?? null,
+          createdByApiKeyId: author.createdByApiKeyId ?? null,
           legs: legs.map((leg) => ({
             accountId: leg.accountId,
             amountMinor: leg.amount.amountMinor,
@@ -268,6 +321,126 @@ export class LedgerService {
 
       throw error;
     }
+  }
+
+  /**
+   * Reverses an entry by recording a new one with every leg negated.
+   *
+   * This is the only correction mechanism the system has, and it is a consequence of invariant
+   * 2 rather than a policy choice: entries and postings cannot be updated or deleted by any
+   * role, so an error in the record is fixed by adding to the record, never by rewriting it.
+   * The original stays exactly as it was, and both entries remain visible - which is the
+   * behaviour an auditor expects and the reason the trial balance still adds up afterwards.
+   *
+   * A reversal is itself an ordinary entry, so reversing one is permitted. What is not is
+   * reversing the same entry twice, which would double the correction.
+   */
+  async reverseEntry(
+    bookId: string,
+    entryId: string,
+    input: ReverseEntryInput = {},
+    author: Authorship = {},
+  ): Promise<EntryRecord> {
+    const parsed = parseInput(reverseEntryInputSchema, input, 'reversal');
+    const recordedAt = this.clock.now();
+
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const original = await this.repository.findEntryById(tx, entryId);
+
+      // Under row-level security an entry in another book is not visible, so this covers both
+      // "no such entry" and "not yours" - and answers the same way for each, which is the
+      // point.
+      if (original === null) throw new EntryNotFoundError(entryId);
+
+      const existing = await this.repository.findReversalOf(tx, entryId);
+      if (existing !== null) throw new EntryAlreadyReversedError(entryId, existing.id);
+
+      return this.repository.insertEntry(tx, {
+        id: this.newId(),
+        bookId,
+
+        // When the correction happens, not when the original did. Backdating a reversal to
+        // the original's date would make a balance that was correct as of last March silently
+        // change, and "what did we believe on the 31st" would stop having an answer.
+        occurredAt: parsed.occurredAt ?? recordedAt,
+        recordedAt,
+        description: parsed.description ?? `Reversal of: ${original.description}`,
+
+        // Deliberately not inherited. `external_id` is unique per book, so copying the
+        // original's would collide, and a reversal is a different event that deserves its own
+        // idempotency key or none at all.
+        externalId: parsed.externalId ?? null,
+
+        reversalOf: entryId,
+        createdByUserId: author.createdByUserId ?? null,
+        createdByApiKeyId: author.createdByApiKeyId ?? null,
+
+        legs: original.postings.map((posting) => ({
+          accountId: posting.accountId,
+          amountMinor: -posting.amountMinor,
+          currency: posting.currency,
+        })),
+      });
+    });
+  }
+
+  /**
+   * The trial balance: every account with its balance, and the proof that the book adds up.
+   *
+   * The totals are per currency, not per book. A book's `base_currency` is a default for
+   * reporting, not a claim that everything in it is denominated that way, and adding a EUR
+   * balance to a USD one produces a number that means nothing. Each currency balances on its
+   * own or the book is broken, which is the same rule the zero-sum invariant applies to a
+   * single entry.
+   *
+   * Debits and credits are the positive and negative balances stated separately. In a system
+   * that stores signed amounts they carry no information the sum does not - `balanced` is
+   * exactly `debits === credits` is exactly `sum === 0` - but they are how the report is read,
+   * and a trial balance that made an accountant do the arithmetic would be an odd thing to
+   * ship.
+   */
+  async trialBalance(bookId: string, asOf?: Date | undefined): Promise<TrialBalanceResult> {
+    const rows = await this.unitOfWork.transactionInBook(bookId, (tx) =>
+      this.repository.trialBalance(tx, bookId, asOf),
+    );
+
+    const accounts = rows.map((row) => ({
+      accountId: row.accountId,
+      name: row.name,
+      type: row.type,
+      currency: row.currency,
+      balance: money(row.balanceMinor, row.currency),
+    }));
+
+    const byCurrency = new Map<string, { debits: bigint; credits: bigint }>();
+    for (const row of rows) {
+      const totals = byCurrency.get(row.currency) ?? { debits: 0n, credits: 0n };
+
+      if (row.balanceMinor > 0n) totals.debits += row.balanceMinor;
+      else totals.credits += -row.balanceMinor;
+
+      byCurrency.set(row.currency, totals);
+    }
+
+    const totals = [...byCurrency]
+      .map(([currency, { debits, credits }]) => ({
+        currency,
+        debits: money(debits, currency),
+        credits: money(credits, currency),
+        balanced: debits === credits,
+      }))
+      .sort((a, b) => a.currency.localeCompare(b.currency));
+
+    return {
+      bookId,
+      asOf: asOf ?? null,
+      accounts,
+      totals,
+      // The assertion the report exists to make. False here means the database has been
+      // written to by something that bypassed the deferred constraint trigger, which should
+      // be impossible - so it is worth stating rather than assuming.
+      balanced: totals.every((total) => total.balanced),
+    };
   }
 
   /**

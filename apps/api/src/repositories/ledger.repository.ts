@@ -50,11 +50,25 @@ export interface NewEntry {
   readonly recordedAt: Date;
   readonly description: string;
   readonly externalId: string | null;
+  /** Set when this entry reverses another. Null for an ordinary entry. */
+  readonly reversalOf?: string | null;
+  /** Exactly one of these is set for anything written through the API. */
+  readonly createdByUserId?: string | null;
+  readonly createdByApiKeyId?: string | null;
   readonly legs: readonly {
     readonly accountId: string;
     readonly amountMinor: bigint;
     readonly currency: string;
   }[];
+}
+
+/** One line of the trial balance: an account and what it holds. */
+export interface TrialBalanceRow {
+  readonly accountId: string;
+  readonly name: string;
+  readonly type: AccountRecord['type'];
+  readonly currency: string;
+  readonly balanceMinor: bigint;
 }
 
 /** A posting joined to the entry that explains it, which is what a statement line is. */
@@ -101,7 +115,12 @@ export interface LedgerRepository {
     bookId: string,
     externalId: string,
   ): Promise<EntryRecord | null>;
+  findEntryById(executor: Executor, entryId: string): Promise<EntryRecord | null>;
+  /** The entry that reverses this one, if there is one. */
+  findReversalOf(executor: Executor, entryId: string): Promise<{ id: string } | null>;
   insertEntry(executor: Executor, entry: NewEntry): Promise<EntryRecord>;
+  /** Every account in the book with its balance, including the ones with no postings. */
+  trialBalance(executor: Executor, bookId: string, asOf?: Date | undefined): Promise<TrialBalanceRow[]>;
   /** Sum of an account's postings, optionally as of a point in *occurred* time. */
   sumPostings(executor: Executor, accountId: string, asOf?: Date | undefined): Promise<bigint>;
   /** Sum of an account's postings up to and including a posting id. The cursor's opening balance. */
@@ -210,6 +229,86 @@ export class DrizzleLedgerRepository implements LedgerRepository {
     return { ...entry, postings: await this.postingsOfEntry(executor, entry.id) };
   }
 
+  async findEntryById(executor: Executor, entryId: string): Promise<EntryRecord | null> {
+    const [entry] = await executor.select().from(entries).where(eq(entries.id, entryId)).limit(1);
+    if (entry === undefined) return null;
+
+    return { ...entry, postings: await this.postingsOfEntry(executor, entry.id) };
+  }
+
+  /**
+   * Whether anything already reverses this entry.
+   *
+   * Stage 4 makes this impossible to get wrong by adding a partial unique index on
+   * `reversal_of`, at which point this read becomes an optimisation and the database becomes
+   * the enforcement. Until then it is the only thing standing between an entry and two
+   * reversals, and two concurrent requests can both pass it - which is exactly the class of
+   * bug stage 4 exists to demonstrate.
+   */
+  async findReversalOf(executor: Executor, entryId: string): Promise<{ id: string } | null> {
+    const [reversal] = await executor
+      .select({ id: entries.id })
+      .from(entries)
+      .where(eq(entries.reversalOf, entryId))
+      .limit(1);
+
+    return reversal ?? null;
+  }
+
+  /**
+   * Every account in the book, with the sum of its postings.
+   *
+   * A LEFT JOIN, so an account with no postings appears with a balance of zero rather than
+   * vanishing. A trial balance that silently omitted the accounts it found least interesting
+   * would be a strange sort of report.
+   *
+   * One query, not one per account. The obvious implementation - list the accounts, then ask
+   * for each balance - is the N+1 that stage 5's query-count assertion is meant to catch, and
+   * it is worth not writing in the first place.
+   */
+  async trialBalance(
+    executor: Executor,
+    bookId: string,
+    asOf?: Date | undefined,
+  ): Promise<TrialBalanceRow[]> {
+    // An aggregate FILTER rather than a condition in the JOIN or the WHERE, and both of those
+    // are wrong in ways worth naming. In the WHERE, the filter discards the null rows the
+    // outer join produces and quietly turns it back into an inner join, so accounts with no
+    // qualifying postings disappear. In the JOIN to `entries`, it excludes the entry but not
+    // the posting - the posting row survives with null entry columns and its amount is still
+    // summed. FILTER applies to the aggregate itself, which is the only place the question
+    // "should this amount count" actually belongs.
+    const total =
+      asOf === undefined
+        ? sql<string>`coalesce(sum(${postings.amountMinor}), 0)::text`
+        : sql<string>`coalesce(sum(${postings.amountMinor}) filter (where ${entries.occurredAt} <= ${asOf}), 0)::text`;
+
+    const rows = await executor
+      .select({
+        accountId: accounts.id,
+        name: accounts.name,
+        type: accounts.type,
+        currency: accounts.currency,
+        // ::text, then BigInt. A sum over bigint returns numeric, and numeric arrives as a
+        // string that would otherwise be tempting to hand to Number().
+        total,
+      })
+      .from(accounts)
+      .leftJoin(postings, eq(postings.accountId, accounts.id))
+      .leftJoin(entries, eq(entries.id, postings.entryId))
+      .where(eq(accounts.bookId, bookId))
+      .groupBy(accounts.id, accounts.name, accounts.type, accounts.currency)
+      .orderBy(asc(accounts.type), asc(accounts.name));
+
+    return rows.map((row) => ({
+      accountId: row.accountId,
+      name: row.name,
+      type: row.type,
+      currency: row.currency,
+      balanceMinor: BigInt(row.total),
+    }));
+  }
+
   private async postingsOfEntry(executor: Executor, entryId: string): Promise<PostingRecord[]> {
     return executor
       .select({
@@ -243,6 +342,9 @@ export class DrizzleLedgerRepository implements LedgerRepository {
         recordedAt: entry.recordedAt,
         description: entry.description,
         externalId: entry.externalId,
+        reversalOf: entry.reversalOf ?? null,
+        createdByUserId: entry.createdByUserId ?? null,
+        createdByApiKeyId: entry.createdByApiKeyId ?? null,
       })
       .returning();
 
