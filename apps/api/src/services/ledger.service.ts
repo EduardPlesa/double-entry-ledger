@@ -80,6 +80,19 @@ const listPostingsOptionsSchema = z.object({
 
 export type ListPostingsOptions = z.input<typeof listPostingsOptionsSchema>;
 
+/**
+ * The five account types of double-entry bookkeeping, matching the Postgres enum. Fixed by
+ * accounting rather than by product requirements - there will never be a sixth.
+ */
+const createAccountSchema = z.object({
+  name: z.string().trim().min(1, 'must not be blank').max(200),
+  type: z.enum(['asset', 'liability', 'equity', 'revenue', 'expense']),
+  currency: z.string().regex(CURRENCY_RE, 'must be a three-letter ISO 4217 code, such as EUR'),
+  parentId: z.uuid('must be a UUID').nullish(),
+});
+
+export type CreateAccountInput = z.input<typeof createAccountSchema>;
+
 export interface PostEntryResult {
   readonly entry: EntryRecord;
   /**
@@ -137,6 +150,44 @@ export class LedgerService {
     this.unitOfWork = dependencies.unitOfWork;
     this.clock = dependencies.clock;
     this.newId = dependencies.newId;
+  }
+
+  /**
+   * Creates an account in a book.
+   *
+   * Inside a book-scoped transaction, so the policy's WITH CHECK is what physically prevents
+   * an account being written into a book the caller is not scoped to - the `bookId` here
+   * comes from the authorize guard, and the database refuses anything else.
+   *
+   * A parent in another book is rejected by the composite foreign key, and is invisible under
+   * the policy anyway; a parent that does not exist comes back as a foreign key violation.
+   * Both are the database's job, not a pre-flight query's.
+   */
+  async createAccount(bookId: string, input: CreateAccountInput): Promise<AccountRecord> {
+    const parsed = parseInput(createAccountSchema, input, 'account');
+
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      if (parsed.parentId !== null && parsed.parentId !== undefined) {
+        const parent = await this.repository.findAccountById(tx, parsed.parentId);
+        if (parent === null) throw new AccountNotFoundError([parsed.parentId]);
+
+        // Not a database constraint, and could not easily be one: a currency mismatch between
+        // parent and child is representable and would produce a tree whose subtotals cannot
+        // be added up. Rejected here, where the message can say so.
+        if (parent.currency !== parsed.currency) {
+          throw new CurrencyMismatchError(parsed.parentId, parent.currency, parsed.currency);
+        }
+      }
+
+      return this.repository.insertAccount(tx, {
+        id: this.newId(),
+        bookId,
+        name: parsed.name,
+        type: parsed.type,
+        currency: parsed.currency,
+        parentId: parsed.parentId ?? null,
+      });
+    });
   }
 
   /**

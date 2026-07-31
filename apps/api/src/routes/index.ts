@@ -1,7 +1,11 @@
 import type { RequestHandler } from 'express';
 import type { AuthService } from '../services/auth.service.js';
+import type { BookService } from '../services/book.service.js';
+import type { LedgerService } from '../services/ledger.service.js';
 import { authRoutes } from './auth.routes.js';
-import type { RouteAccess, RouteDefinition } from './registry.js';
+import { bookRoutes } from './books.routes.js';
+import { ledgerRoutes } from './ledger.routes.js';
+import type { RouteDefinition } from './registry.js';
 
 /**
  * Every route in the application, assembled in one place.
@@ -12,10 +16,17 @@ import type { RouteAccess, RouteDefinition } from './registry.js';
 
 export interface RouteDependencies {
   readonly auth: AuthService;
+  readonly books: BookService;
+  readonly ledger: LedgerService;
 }
 
 export function allRoutes(dependencies: RouteDependencies): RouteDefinition[] {
-  return [health(), ...authRoutes({ auth: dependencies.auth })];
+  return [
+    health(),
+    ...authRoutes({ auth: dependencies.auth }),
+    ...bookRoutes({ books: dependencies.books }),
+    ...ledgerRoutes({ ledger: dependencies.ledger }),
+  ];
 }
 
 /**
@@ -38,18 +49,3 @@ function health(): RouteDefinition {
   };
 }
 
-/**
- * The middleware enforcing each access requirement.
- *
- * Authentication and authorization arrive in the next commit; until then only `public` can be
- * satisfied, and the other two throw at wiring time rather than at request time. A guard that
- * quietly permitted what it could not check would be exactly the failure the whole registry
- * exists to prevent, and it would not show up in a test - the route would simply work.
- */
-export function guardsFor(access: RouteAccess): readonly RequestHandler[] {
-  if (access.kind === 'public') return [];
-
-  throw new Error(
-    `no guard is wired for access kind "${access.kind}" yet; refusing to register a route that would be unprotected`,
-  );
-}

@@ -32,6 +32,7 @@ const STATUS: Record<DomainErrorCode, Mapping> = {
   // 403 is only ever "you are a member of this book and your role is not enough". Not being
   // a member at all produces a 404 below, deliberately.
   FORBIDDEN: { status: 403, title: 'Insufficient permissions' },
+  API_KEY_NOT_PERMITTED: { status: 403, title: 'Not available to API keys' },
 
   // 404, including for things that exist in another book. Answering more precisely would
   // confirm the existence of rows the caller is not authorised to know about.

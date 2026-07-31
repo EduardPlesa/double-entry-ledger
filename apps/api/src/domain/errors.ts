@@ -34,7 +34,8 @@ export type DomainErrorCode =
   | 'EMAIL_ALREADY_REGISTERED'
   | 'USER_NOT_FOUND'
   | 'IDEMPOTENCY_KEY_IN_FLIGHT'
-  | 'IDEMPOTENCY_KEY_REUSED';
+  | 'IDEMPOTENCY_KEY_REUSED'
+  | 'API_KEY_NOT_PERMITTED';
 
 export abstract class DomainError extends Error {
   abstract readonly code: DomainErrorCode;
@@ -196,6 +197,22 @@ export class ForbiddenError extends DomainError {
     readonly role: string,
   ) {
     super(`the ${role} role does not carry ${permission}`);
+  }
+}
+
+/**
+ * An operation a machine client cannot perform, however privileged its key.
+ *
+ * Creating a book is the case that exists: an API key is scoped to exactly one book, so a key
+ * creating a second one would either escape its own scope or produce a book it cannot reach.
+ * Neither is a permission question, which is why this is not a ForbiddenError - no role would
+ * make it possible.
+ */
+export class ApiKeyNotPermittedError extends DomainError {
+  readonly code = 'API_KEY_NOT_PERMITTED';
+
+  constructor(readonly operation: string) {
+    super(`${operation} requires a user session; an API key is scoped to one book`);
   }
 }
 
