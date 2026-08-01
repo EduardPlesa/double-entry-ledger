@@ -107,6 +107,21 @@ describe('postEntry', () => {
 
   it('accepts a balanced multi-leg entry', async () => {
     const target = await freshBook();
+
+    // Funds both asset accounts before the split withdrawal below. Without this, cash and
+    // bank start at zero and the entry would overdraw them under the rule task 3 adds - a
+    // real violation, not an artifact of the fixture, and unrelated to what this test is
+    // actually about.
+    await service.postEntry(target.bookId, {
+      occurredAt: '2026-02-01T00:00:00.000Z',
+      description: 'funding for the split rent payment',
+      legs: [
+        { accountId: target.cash, amount: '70.00', currency: 'EUR' },
+        { accountId: target.bank, amount: '30.00', currency: 'EUR' },
+        { accountId: target.sales, amount: '-100.00', currency: 'EUR' },
+      ],
+    });
+
     const { entry } = await service.postEntry(target.bookId, {
       occurredAt: OCCURRED,
       description: 'rent, split',

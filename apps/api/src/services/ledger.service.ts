@@ -6,6 +6,7 @@ import {
   AccountClosedError,
   AccountNotFoundError,
   AccountNotInBookError,
+  AccountOverdrawnError,
   BookNotFoundError,
   EntryAlreadyReversedError,
   EntryNotFoundError,
@@ -14,6 +15,7 @@ import {
   UnbalancedEntryError,
   ValidationError,
 } from '../domain/errors.js';
+import { isGuardedAccountType } from '../domain/overdraft.js';
 import type {
   AccountRecord,
   EntryRecord,
@@ -278,7 +280,13 @@ export class LedgerService {
           if (existing !== null) return { entry: existing, created: false };
         }
 
-        await this.assertPostable(tx, bookId, legs);
+        const accounts = await this.assertPostable(tx, bookId, legs);
+
+        const postedLegs = legs.map((leg) => ({
+          accountId: leg.accountId,
+          amountMinor: leg.amount.amountMinor,
+          currency: leg.amount.currency,
+        }));
 
         const entry = await this.repository.insertEntry(tx, {
           id: entryId,
@@ -289,12 +297,10 @@ export class LedgerService {
           externalId,
           createdByUserId: author.createdByUserId ?? null,
           createdByApiKeyId: author.createdByApiKeyId ?? null,
-          legs: legs.map((leg) => ({
-            accountId: leg.accountId,
-            amountMinor: leg.amount.amountMinor,
-            currency: leg.amount.currency,
-          })),
+          legs: postedLegs,
         });
+
+        await this.assertNoOverdraft(tx, postedLegs, accounts);
 
         return { entry, created: true };
       });
@@ -355,7 +361,13 @@ export class LedgerService {
       const existing = await this.repository.findReversalOf(tx, entryId);
       if (existing !== null) throw new EntryAlreadyReversedError(entryId, existing.id);
 
-      return this.repository.insertEntry(tx, {
+      const legs = original.postings.map((posting) => ({
+        accountId: posting.accountId,
+        amountMinor: -posting.amountMinor,
+        currency: posting.currency,
+      }));
+
+      const reversal = await this.repository.insertEntry(tx, {
         id: this.newId(),
         bookId,
 
@@ -375,12 +387,15 @@ export class LedgerService {
         createdByUserId: author.createdByUserId ?? null,
         createdByApiKeyId: author.createdByApiKeyId ?? null,
 
-        legs: original.postings.map((posting) => ({
-          accountId: posting.accountId,
-          amountMinor: -posting.amountMinor,
-          currency: posting.currency,
-        })),
+        legs,
       });
+
+      // A reversal is not exempt. An entry that cannot be reversed without overdrawing an
+      // account is one whose reversal alone is not the correction, and the error says how
+      // much has to be deposited first.
+      await this.assertNoOverdraft(tx, legs, await this.accountsOfLegs(tx, legs));
+
+      return reversal;
     });
   }
 
@@ -523,7 +538,11 @@ export class LedgerService {
    * know about it, so this is the only enforcement, which is why it happens inside the
    * transaction rather than before it.
    */
-  private async assertPostable(tx: Executor, bookId: string, legs: readonly Leg[]): Promise<void> {
+  private async assertPostable(
+    tx: Executor,
+    bookId: string,
+    legs: readonly Leg[],
+  ): Promise<Map<string, AccountRecord>> {
     const accountIds = [...new Set(legs.map((leg) => leg.accountId))];
     const found = await this.repository.findAccountsByIds(tx, accountIds);
     const byId = new Map(found.map((account) => [account.id, account]));
@@ -546,6 +565,58 @@ export class LedgerService {
         throw new CurrencyMismatchError(leg.accountId, account.currency, leg.amount.currency);
       }
     }
+
+    return byId;
+  }
+
+  /**
+   * The overdraft rule: no guarded account may be negative at any point in its history.
+   *
+   * Run *after* the insert, deliberately. The new postings are then simply part of the
+   * history the query examines, so there is no pending state to merge with committed state
+   * and reversals need no separate code path. A violation throws and the transaction rolls
+   * back, which is the same bargain the deferred zero-sum trigger makes.
+   *
+   * Only accounts carrying a *negative* leg are checked. If every leg on an account is
+   * non-negative no prefix can fall: all legs of an entry share one `occurred_at`, and new
+   * postings take ids above every existing row, so prefixes before the entry are untouched
+   * and every prefix at or after it rises. Note that a positive *net* is not enough - an
+   * entry with -100 and +150 on one account nets +50 and dips to -100 in between.
+   *
+   * This implementation is correct exactly as long as nothing else is writing. Stage 4's
+   * whole point is that READ COMMITTED does not make that true; `evidence/overdraft-race`
+   * has the proof and the row locks are what fix it.
+   */
+  private async assertNoOverdraft(
+    tx: Executor,
+    legs: readonly PostedLeg[],
+    known: ReadonlyMap<string, AccountRecord>,
+  ): Promise<void> {
+    for (const accountId of guardedAccountsAtRisk(legs, known)) {
+      const lowest = await this.repository.lowestPrefixBalance(tx, accountId);
+      if (lowest === null || lowest.balanceMinor >= 0n) continue;
+
+      const account = known.get(accountId);
+      throw new AccountOverdrawnError(
+        accountId,
+        { currency: account?.currency ?? '', amountMinor: lowest.balanceMinor },
+        lowest.occurredAt,
+      );
+    }
+  }
+
+  /**
+   * The accounts an entry's legs refer to, as records. `postEntry` already has them from
+   * `assertPostable`; `reverseEntry` does not, because its legs come from the original entry
+   * rather than from user input that had to be validated.
+   */
+  private async accountsOfLegs(
+    tx: Executor,
+    legs: readonly PostedLeg[],
+  ): Promise<Map<string, AccountRecord>> {
+    const ids = [...new Set(legs.map((leg) => leg.accountId))];
+    const found = await this.repository.findAccountsByIds(tx, ids);
+    return new Map(found.map((account) => [account.id, account]));
   }
 }
 
@@ -627,6 +698,36 @@ function toLegs(legs: readonly { accountId: string; amount: string; currency: st
 
     return { accountId: leg.accountId, amount };
   });
+}
+
+/** A leg as it is written: minor units, not `Money`. What both write paths have in common. */
+interface PostedLeg {
+  readonly accountId: string;
+  readonly amountMinor: bigint;
+}
+
+/**
+ * Which accounts this entry could possibly overdraw: guarded, and taking money out.
+ *
+ * Sorted, so the order accounts are checked - and, from the row-lock fix onwards, locked -
+ * is a property of the data rather than of how the caller happened to order the legs. Two
+ * concurrent entries touching the same pair of accounts in opposite order would otherwise
+ * deadlock.
+ */
+function guardedAccountsAtRisk(
+  legs: readonly PostedLeg[],
+  known: ReadonlyMap<string, AccountRecord>,
+): string[] {
+  const atRisk = new Set<string>();
+
+  for (const leg of legs) {
+    if (leg.amountMinor >= 0n) continue;
+
+    const account = known.get(leg.accountId);
+    if (account !== undefined && isGuardedAccountType(account.type)) atRisk.add(account.id);
+  }
+
+  return [...atRisk].sort();
 }
 
 /**
