@@ -68,8 +68,13 @@ describe('lowestPrefixBalance', () => {
   });
 
   it('is the running minimum, not the final balance', async () => {
-    // +500, then -800, then +1000: ends at +700, dips to -300 in the middle.
+    // An opening deposit well ahead of the rest so `book.cash` - an asset account, guarded by
+    // migration 0007's overdraft trigger - never actually goes negative; the window function
+    // under test does not care about sign, only about tracking the running minimum correctly.
+    // +500, then -800, then +1000 on top of that: ends 700 above the opening balance, dips to
+    // 300 below it in the middle.
     const book = await bookWith([
+      { occurredAt: '2025-01-01T00:00:00.000Z', amountMinor: 1_000_000n },
       { occurredAt: '2026-01-01T00:00:00.000Z', amountMinor: 500n },
       { occurredAt: '2026-02-01T00:00:00.000Z', amountMinor: -800n },
       { occurredAt: '2026-03-01T00:00:00.000Z', amountMinor: 1000n },
@@ -79,13 +84,15 @@ describe('lowestPrefixBalance', () => {
       repository.lowestPrefixBalance(tx, book.cash),
     );
 
-    expect(lowest?.balanceMinor).toBe(-300n);
+    expect(lowest?.balanceMinor).toBe(999_700n);
     expect(lowest?.occurredAt.toISOString()).toBe('2026-02-01T00:00:00.000Z');
   });
 
   it('orders by occurred_at, not by insertion order', async () => {
-    // The withdrawal is recorded second but happened first, so it dips below zero.
+    // Funded for the same reason as above. The withdrawal is recorded second but happened
+    // first, so it dips below the opening balance first.
     const book = await bookWith([
+      { occurredAt: '2025-01-01T00:00:00.000Z', amountMinor: 1_000_000n },
       { occurredAt: '2026-02-01T00:00:00.000Z', amountMinor: 500n },
       { occurredAt: '2026-01-01T00:00:00.000Z', amountMinor: -200n },
     ]);
@@ -94,13 +101,15 @@ describe('lowestPrefixBalance', () => {
       repository.lowestPrefixBalance(tx, book.cash),
     );
 
-    expect(lowest?.balanceMinor).toBe(-200n);
+    expect(lowest?.balanceMinor).toBe(999_800n);
     expect(lowest?.occurredAt.toISOString()).toBe('2026-01-01T00:00:00.000Z');
   });
 
   it('breaks ties on posting id, so the same instant has one answer', async () => {
-    // Same instant: -200 then +500 dips, +500 then -200 does not. Insertion order decides.
+    // Funded for the same reason as above. Same instant: -200 then +500 dips, +500 then -200
+    // does not. Insertion order decides.
     const book = await bookWith([
+      { occurredAt: '2025-01-01T00:00:00.000Z', amountMinor: 1_000_000n },
       { occurredAt: '2026-01-01T00:00:00.000Z', amountMinor: -200n },
       { occurredAt: '2026-01-01T00:00:00.000Z', amountMinor: 500n },
     ]);
@@ -109,6 +118,6 @@ describe('lowestPrefixBalance', () => {
       repository.lowestPrefixBalance(tx, book.cash),
     );
 
-    expect(lowest?.balanceMinor).toBe(-200n);
+    expect(lowest?.balanceMinor).toBe(999_800n);
   });
 });
