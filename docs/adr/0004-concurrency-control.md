@@ -77,7 +77,7 @@ account the race reproduces on the first round with or without the trigger. A ru
 distinguished them would need either far lower concurrency or far more rounds, and neither
 was done.
 
-## Option A — `SELECT ... FOR UPDATE` on the accounts at risk
+## Option A — `SELECT ... FOR NO KEY UPDATE` on the accounts at risk
 
 Before the insert, the service collects the guarded accounts the entry takes money out of,
 sorts them, and locks their rows in one statement
@@ -92,9 +92,29 @@ entire bug.
 
 Only negative-leg accounts are locked, and that is sufficient: two transactions can jointly
 overdraw an account only if both take money out of it, and both of those arrive here. A
-concurrent *positive* posting is unlocked and unseen, which is conservative rather than
-wrong — adding a positive posting at time T raises the prefixes at or after T and lowers
-none.
+concurrent *positive* posting is not blocked, and does not need to be — adding a positive
+posting at time T raises the prefixes at or after T and lowers none, so a depositor cannot
+turn a decision taken under this lock into the wrong one.
+
+**The lock mode is `FOR NO KEY UPDATE`, and that is a correction rather than a detail.** The
+first implementation used `FOR UPDATE`, and it deadlocked on a case neither the reasoning
+above nor the deadlock suite reached. Inserting a posting makes Postgres check
+`postings_account_same_book_currency_fk` against the parent row, which it does as
+`SELECT 1 FROM accounts ... FOR KEY SHARE` — so an entry takes a lock on the accounts of its
+*positive* legs too, one that `lockAccountsAtRisk` never requests, never sees and therefore
+never orders. `FOR UPDATE` conflicts with `FOR KEY SHARE`. A transfer of `[cash −100, bank
++100]` held `cash` explicitly and then waited on `bank` implicitly, while the mirrored
+`[bank −100, cash +100]` did the reverse; Postgres killed one with `40P01`, `withRetry`
+deliberately does not retry that, nothing translated it, and the loser of a perfectly
+legitimate transfer got an HTTP 500.
+
+`FOR NO KEY UPDATE` conflicts with itself, so two withdrawals from one account still
+serialise — the only thing the lock exists to do, and what the race test measures. It does
+not conflict with `FOR KEY SHARE`, so the foreign key checks and the concurrent deposits pass
+freely. The claim in the paragraph above is therefore true for a mechanical reason and not
+merely a conservative approximation. `tests/concurrency/deadlock.test.ts` now carries the
+crossed-transfer case as the positive control: it reproduced a genuine `40P01` on the first
+round against `FOR UPDATE`, and passes against `FOR NO KEY UPDATE`.
 
 **What it buys.**
 
@@ -106,9 +126,15 @@ none.
 **What it costs.**
 
 - A writer to a hot account waits for the whole check, not just for the insert. The check is
-  `lowestPrefixBalance`, a window scan over that account's entire posting range, and it runs
-  while the lock is held. The wait therefore grows with the account's history.
-- `accounts` is behind row-level security, so `FOR UPDATE` sees only rows in the current
+  `lowestPrefixBalance`, a window function over that account's entire posting range, and it
+  runs while the lock is held. **And the wait grows with the whole `postings` table, not with
+  the account's history** — `postings` carries no index on `account_id`, so this is a
+  sequential scan of every posting in the database that then discards the rows belonging to
+  other accounts. The deferred `LG004` trigger runs the same scan again at COMMIT, once per
+  inserted guarded posting, and COMMIT is still inside the lock window. So a single two-legged
+  withdrawal from a guarded account pays for at least two full table scans with the row lock
+  held, and what makes them expensive is every other account's traffic.
+- `accounts` is behind row-level security, so the lock sees only rows in the current
   book. That is correct, and it works only because `transactionInBook` has already issued
   its `SET LOCAL` before any of this runs.
 - It requires a deterministic lock order — see below.
@@ -130,7 +156,7 @@ refuses to serialize it.
 - **Aborts are the normal case under contention.** Instrumenting `onRetry` across the
   concurrency suite — 6 rounds × 16 concurrent writers = 96 contested `postEntry` calls —
   showed on the order of 390 retries, i.e. **roughly four aborts per contested call**, with
-  `maxAttempts` at its default of 5 and no call reported as exhausting it.
+  `maxAttempts` at its default of 5.
 
   That figure deserves a caveat rather than a decimal point. `maxAttempts` counts total
   attempts, so the ceiling is 96 × 4 = 384 retries; 390 sits slightly *above* that ceiling,
@@ -138,6 +164,28 @@ refuses to serialize it.
   shape of the finding — most contested calls aborting nearly to the cap — is robust and is
   what the decision rests on. The exact number is not, and should not be quoted as though it
   were.
+
+- **Retries do not merely run close to the cap; they hit it, every time, for every loser.**
+  An earlier revision of this document said no call was reported as exhausting `maxAttempts`.
+  That was wrong, and the hardened assertions in `tests/concurrency/overdraft.race.test.ts`
+  are what found it. Classifying every rejection by SQLSTATE across five rounds of the
+  standard scenario — €500.00, sixteen concurrent €100.00 withdrawals — gives an identical
+  result on every round under each strategy:
+
+  | strategy       | accepted | rejected | `ACCOUNT_OVERDRAWN` | exhausted `40001` |
+  | -------------- | -------- | -------- | ------------------- | ----------------- |
+  | `row-lock`     | 5        | 11       | 11                  | 0                 |
+  | `serializable` | 5        | 11       | 0                   | 11                |
+
+  **The accepted count is the same under both, and that is the point worth keeping**: both
+  strategies enforce the rule exactly, admitting the five withdrawals the money pays for and
+  no more. What differs is entirely in what the eleven losers are told. Under row locks every
+  one of them receives the domain's own answer — a 422 saying the account cannot afford it,
+  which is true and actionable. Under SSI **not one of them ever gets that far**: the read set
+  is the account's whole posting range, so each loser is aborted, retried to the cap, and
+  ultimately handed a raw serialization failure describing a database condition rather than a
+  business one. The claim in the decision below that "waiting degrades better than a `40001`
+  the client has to understand" is not a prediction; it is this table.
 - **The retry wrapper has to wrap the whole unit of work**, `set_config` included, because a
   retry is a fresh transaction with no book context. Anything that must not repeat has to be
   hoisted out of it: `postEntry` computes the entry id and `recordedAt` before the first
@@ -163,14 +211,34 @@ JavaScript sort removed as well, no `40P01` occurred. `accounts` carries two btr
 structures leading with `id` — the primary key and `accounts_id_book_id_currency_key` — so
 Postgres visits an indexed `IN (...)` list's matches in ascending id order regardless of
 what the clause says; `EXPLAIN` shows no `Sort` node in any variant, present, absent or
-reversed to `DESC`. A separate positive-control test that crossed the locks by hand *did*
-provoke a real `40P01`, so the harness genuinely detects deadlocks and the negative result
-is not an artefact of the test being blind. That control was scratch work and is not
-committed.
+reversed to `DESC`.
 
 Both orderings are kept anyway, as **contract rather than as accident**. They state what
 these call paths promise, rather than what they currently get for free from an index that
 could be dropped or reshaped later.
+
+**But the deadlock that actually existed was not this one, and no amount of lock ordering
+would have prevented it.** Both entries in the end-to-end test above drain *both* accounts, so
+both accounts land in both at-risk sets and the sorted order applies to everything either
+transaction touches. A crossed *transfer* — `[cash −100, bank +100]` against
+`[bank −100, cash +100]` — does not have that shape: each side explicitly locks one account
+and merely writes to the other. The write is not lock-free. Inserting a posting makes Postgres
+check `postings_account_same_book_currency_fk` as `SELECT 1 FROM accounts ... FOR KEY SHARE`
+on the parent row, and under `FOR UPDATE` — which conflicts with `FOR KEY SHARE` — each side
+held one account and waited on the other through a lock the service never requested, never saw
+and therefore never sorted. Postgres killed one with `40P01`; nothing retried or translated it;
+a legitimate transfer became an HTTP 500. Sorting cannot fix a lock you do not know you are
+taking. **Weakening the mode to `FOR NO KEY UPDATE` can, and does** — see Option A above.
+
+**The crossed case is now a committed test.** An earlier revision noted a scratch
+positive-control that crossed the locks by hand, provoked a genuine `40P01`, and was thrown
+away. `tests/concurrency/deadlock.test.ts` now carries the crossed-transfer scenario instead,
+which is better than that control was: it is a *negative* test that reproduced a real `40P01`
+on its first round against `FOR UPDATE` and passes against `FOR NO KEY UPDATE`, so it both
+proves the harness detects deadlocks and fails if this regresses. It also reads the SQLSTATE
+through `hasSqlState` rather than off `error.code`, because drizzle wraps the driver's error
+and the top-level `code` is `undefined` for every deadlock there is — an assertion built on it
+reports `[undefined]` and passes `not.toContain('40P01')` while the deadlock is happening.
 
 **Option B has no deadlocks, but has aborts instead** — a `40001` is the serialization
 failure taking the place of the mutual wait.
@@ -212,12 +280,18 @@ actually separate the two.
 
 ## Consequences
 
-- **The overdraft check is a window scan under a row lock.** It reads every posting on the
-  account, and `postings` deliberately carries no index on `account_id` yet — see the note
-  in `apps/api/src/db/schema.ts`. So the duration of the lock grows linearly with the
-  account's history. Stage 7 takes this as one of its subjects, with `EXPLAIN ANALYZE` and
-  an index on `postings(account_id)`, and any balance-checkpoint work there changes the read
-  set this decision was made about.
+- **The overdraft check is a sequential scan under a row lock.** `postings` deliberately
+  carries no index on `account_id` yet — see the note in `apps/api/src/db/schema.ts` — so the
+  check reads the *entire* table and keeps the rows for one account. The duration of the lock
+  therefore grows with the size of the whole ledger, not with the account's own history, and
+  it is paid twice per write: once by `lowestPrefixBalance` inside the transaction, once more
+  by the `LG004` trigger at COMMIT, per inserted guarded posting, still inside the lock window.
+  That reclassifies `postings(account_id)` from a read-path index to a **write-path index on
+  the system's hottest critical section**, which is a materially stronger reason to add it than
+  the one recorded when it was deferred. It is still deferred, deliberately: stage 7 takes it
+  as one of its subjects, with `EXPLAIN ANALYZE` either side, and any balance-checkpoint work
+  there changes the read set this decision was made about. Recorded here as a known cost being
+  carried on purpose.
 - **Stage 5's property tests are what would catch a regression in either strategy.** They
   assert the invariant over arbitrary entry sequences rather than over the specific
   sixteen-writer scenario measured here, which is the coverage the concurrency suite cannot
@@ -228,11 +302,34 @@ actually separate the two.
   verify is that calling `lockAccounts` with unsorted input is safe in practice today, and
   it would catch a regression in this method's predicate or in a reshaped index. It is not
   proof that `ORDER BY id` is load-bearing.
-- **The uncommitted crossed-lock positive control is a candidate canary.** Committing it —
-  as a test that asserts a deadlock *does* occur when locks are deliberately crossed — would
-  give the deadlock suite a control that fails if the harness ever stops detecting `40P01`.
-  It was not committed here.
-- **`ACCOUNT_OVERDRAWN` is a 422 regardless of which layer catches it.** The service raises
-  it from `assertNoOverdraft` with the shortfall and the offending instant; `LG004` maps to
-  the same class in `pg-errors.ts` with null detail, because the deferred check knows which
-  account is short and this process does not. Same class, same code, same status.
+- **The crossed-transfer test is the deadlock suite's control, and it is committed.** An
+  earlier revision of this document proposed a hand-crossed positive control as a candidate
+  canary and recorded that it had been thrown away. What is committed instead is better: a
+  scenario that reproduced a genuine `40P01` against `FOR UPDATE` on its first round and passes
+  against `FOR NO KEY UPDATE`. That is simultaneously the evidence the harness detects
+  deadlocks — which the two negative tests beside it cannot establish about themselves — and a
+  regression test for the bug that was actually there.
+- **`ACCOUNT_OVERDRAWN` is a 422 regardless of which layer catches it, and regardless of which
+  write path reached it.** The service raises it from `assertNoOverdraft` with the shortfall
+  and the offending instant; `LG004` is translated to the same class with null detail, because
+  the deferred check knows which account is short and this process does not. `postEntry` and
+  `reverseEntry` now share one translator, so a reversal that would overdraw an account answers
+  the same 422 as a post that would — through the reversal path the identical database
+  condition was previously an untranslated 500.
+- **`ACCOUNT_OVERDRAWN` is not cached by the idempotency middleware.** It is the first outcome
+  in this system that depends on the state of the ledger rather than on the request: the same
+  body succeeds or fails depending on a balance that anything else can change. Replaying it
+  would pin an answer that has since stopped being true, against exactly the client doing the
+  right thing — take the 422, deposit the shortfall the response named, retry under the same
+  key. The key still guarantees the withdrawal happens at most once; it is the response, not
+  the effect, that is allowed to differ between attempts. See `isReplayable` in
+  `apps/api/src/middleware/idempotency.ts`.
+- **Migration `0007` validates the existing rows before it creates the trigger.** A constraint
+  trigger binds future inserts only, and the service's negative-leg-only optimisation is sound
+  only where the invariant already holds: on an account that is already negative, a pure
+  deposit skips the service check entirely and then trips `LG004` at COMMIT, producing a
+  rejection with no account id and no shortfall for a request that was trying to fix the
+  problem. The migration therefore scans for a negative prefix and refuses to apply rather than
+  leaving the assumption to luck. The trigger's own `WHEN` clause was deliberately left broad:
+  narrowing it to negative postings would make it a mirror of the service's optimisation
+  instead of an independent check of it.
