@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import type { ConcurrencyStrategy } from '../../src/db/client.js';
 import type { LedgerService } from '../../src/services/ledger.service.js';
 import { fireConcurrently, fundedBook } from '../helpers/concurrency.js';
 import { balanceOf } from '../helpers/ledger.js';
@@ -24,19 +25,32 @@ const OPENING = 50_000n;
 const WITHDRAWAL = 10_000n;
 const CONCURRENT = 16;
 
+const STRATEGIES: readonly ConcurrencyStrategy[] = ['row-lock', 'serializable'];
+
 let pool: Pool;
-let service: LedgerService;
 
 beforeAll(() => {
   pool = new Pool({ connectionString: inject('appUrl'), max: 20 });
-  service = createService(pool).service;
 });
 
 afterAll(async () => {
   await pool.end();
 });
 
-describe('concurrent withdrawals', () => {
+describe.each(STRATEGIES)('concurrent withdrawals under %s', (strategy) => {
+  let service: LedgerService;
+  let retries = 0;
+
+  beforeAll(() => {
+    retries = 0;
+    service = createService(pool, {
+      strategy,
+      onRetry: () => {
+        retries += 1;
+      },
+    }).service;
+  });
+
   it('never drives a guarded account negative', async () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const book = await fundedBook(pool, service, OPENING);
@@ -61,5 +75,13 @@ describe('concurrent withdrawals', () => {
     const sales = await balanceOf(pool, book.bookId, book.sales);
 
     expect(cash + rent + sales).toBe(0n);
+  });
+
+  it('retries only under serializable, and actually does', () => {
+    // A retry path that never runs is untested code. Sixteen writers to one account under
+    // SSI will produce 40001s; under row locks they block instead, and there is nothing to
+    // retry.
+    if (strategy === 'serializable') expect(retries).toBeGreaterThan(0);
+    else expect(retries).toBe(0);
   });
 });

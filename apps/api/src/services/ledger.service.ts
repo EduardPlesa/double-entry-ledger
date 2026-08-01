@@ -598,6 +598,11 @@ export class LedgerService {
     legs: readonly PostedLeg[],
     known: ReadonlyMap<string, AccountRecord>,
   ): Promise<void> {
+    // Under SERIALIZABLE the database is already tracking the conflict, and an explicit lock
+    // would serialise writers that SSI would have let through - paying for both mechanisms
+    // and getting the worse half of each.
+    if (this.unitOfWork.strategy === 'serializable') return;
+
     await this.repository.lockAccounts(tx, guardedAccountsAtRisk(legs, known));
   }
 
