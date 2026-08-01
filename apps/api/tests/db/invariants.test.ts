@@ -94,6 +94,17 @@ describe('zero-sum, deferred to COMMIT', () => {
     const book = await withClient(appPool, async (client) => {
       await client.query('BEGIN');
       const seeded = await seedBook(client);
+
+      // Opening balances so the €30.00 of rent below settles without either asset account
+      // going negative - migration 0007's overdraft trigger would otherwise reject it, and
+      // this test is about the zero-sum invariant holding across three legs, not about
+      // overdraft.
+      await insertEntry(client, seeded, [
+        { accountId: seeded.cash, amountMinor: 5000n },
+        { accountId: seeded.bank, amountMinor: 5000n },
+        { accountId: seeded.sales, amountMinor: -10_000n },
+      ]);
+
       // €30.00 of rent, settled partly from cash and partly from the bank.
       await insertEntry(client, seeded, [
         { accountId: seeded.rent, amountMinor: 3000n },
@@ -105,8 +116,8 @@ describe('zero-sum, deferred to COMMIT', () => {
     });
 
     expect(await balanceOf(appPool, book.bookId, book.rent)).toBe(3000n);
-    expect(await balanceOf(appPool, book.bookId, book.cash)).toBe(-1000n);
-    expect(await balanceOf(appPool, book.bookId, book.bank)).toBe(-2000n);
+    expect(await balanceOf(appPool, book.bookId, book.cash)).toBe(4000n);
+    expect(await balanceOf(appPool, book.bookId, book.bank)).toBe(3000n);
   });
 
   it('rejects legs that net to zero across currencies but not within them', async () => {

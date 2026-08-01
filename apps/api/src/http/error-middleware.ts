@@ -1,5 +1,6 @@
+import { formatMoney, money } from '@ledger/shared';
 import type { ErrorRequestHandler } from 'express';
-import { DomainError, ValidationError, type DomainErrorCode } from '../domain/errors.js';
+import { AccountOverdrawnError, DomainError, ValidationError, type DomainErrorCode } from '../domain/errors.js';
 import { PROBLEM_CONTENT_TYPE, problem, type ProblemDetail } from './problem.js';
 import { requestIdOf } from './request-id.js';
 
@@ -56,6 +57,7 @@ const STATUS: Record<DomainErrorCode, Mapping> = {
   ACCOUNT_CLOSED: { status: 422, title: 'Account is closed' },
   CURRENCY_MISMATCH: { status: 422, title: 'Currency mismatch' },
   IDEMPOTENCY_KEY_REUSED: { status: 422, title: 'Idempotency key reused' },
+  ACCOUNT_OVERDRAWN: { status: 422, title: 'Account would be overdrawn' },
 };
 
 export interface ErrorMiddlewareOptions {
@@ -96,6 +98,7 @@ export function errorMiddleware(options: ErrorMiddlewareOptions): ErrorRequestHa
             instance,
             requestId,
             errors: error instanceof ValidationError ? toProblemDetails(error) : undefined,
+            extensions: extensionsOf(error),
           }),
         );
       return;
@@ -145,6 +148,28 @@ export function errorMiddleware(options: ErrorMiddlewareOptions): ErrorRequestHa
 
 function toProblemDetails(error: ValidationError): readonly ProblemDetail[] {
   return error.details.map((detail) => ({ path: detail.path, message: detail.message }));
+}
+
+/**
+ * Error-specific members of the problem document.
+ *
+ * Only the overdraft has any, and it needs them: "how short is it" is the one question a
+ * client asks next, and making them parse it out of `detail` would be making them parse
+ * English. The amount goes out as a decimal string like every other amount at this
+ * boundary - a JSON number would be a double.
+ */
+function extensionsOf(error: DomainError): Readonly<Record<string, unknown>> | undefined {
+  if (!(error instanceof AccountOverdrawnError)) return undefined;
+
+  return {
+    accountId: error.accountId,
+    shortfall:
+      error.shortfall === null
+        ? null
+        : formatMoney(money(error.shortfall.amountMinor, error.shortfall.currency)),
+    currency: error.shortfall?.currency ?? null,
+    occurredAt: error.occurredAt?.toISOString() ?? null,
+  };
 }
 
 /**
