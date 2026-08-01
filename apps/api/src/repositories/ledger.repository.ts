@@ -139,6 +139,11 @@ export interface LedgerRepository {
    * The overdraft rule is exactly `balanceMinor >= 0`.
    */
   lowestPrefixBalance(executor: Executor, accountId: string): Promise<LowestPrefix | null>;
+  /**
+   * Takes a row lock on each account, in ascending id order. Blocks until any transaction
+   * holding one commits or rolls back.
+   */
+  lockAccounts(executor: Executor, accountIds: readonly string[]): Promise<void>;
   listPostings(
     executor: Executor,
     accountId: string,
@@ -461,6 +466,40 @@ export class DrizzleLedgerRepository implements LedgerRepository {
     if (row === undefined) return null;
 
     return { balanceMinor: BigInt(row.balance), occurredAt: new Date(row.occurred_at) };
+  }
+
+  /**
+   * Row locks on the accounts an entry could overdraw.
+   *
+   * The lock is on `accounts`, not on `postings`, and that is the point: the rows being
+   * inserted do not exist yet, so there is nothing there to lock. The account row is a
+   * pre-existing thing every writer to that account has to go through, which turns "check
+   * then insert" into a decision only one transaction can be making at a time.
+   *
+   * `ORDER BY id` prevents deadlock. Two entries touching the same two accounts in opposite
+   * leg order would otherwise take the locks in opposite orders and wait on each other
+   * forever. Postgres plans `LockRows` above `Sort`, so a single statement with ORDER BY
+   * acquires in sorted order; `tests/concurrency/deadlock.test.ts` is what holds that claim
+   * up rather than trusting it.
+   *
+   * Nothing is returned. The rows are already known to the caller - this statement exists
+   * for its side effect, which is the honest description of a lock.
+   *
+   * Built with the query builder rather than a raw `sql` template. Embedding a plain JS array
+   * in a `sql` tag expands it positionally - `any(($1, $2))` - which Postgres parses as a row
+   * constructor, not an array, and rejects with `op ANY/ALL (array) requires array on right
+   * side` the moment two accounts are locked at once. `inArray` binds the ids as an actual
+   * array parameter instead.
+   */
+  async lockAccounts(executor: Executor, accountIds: readonly string[]): Promise<void> {
+    if (accountIds.length === 0) return;
+
+    await executor
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(inArray(accounts.id, [...accountIds]))
+      .orderBy(asc(accounts.id))
+      .for('update');
   }
 
   /**

@@ -288,6 +288,8 @@ export class LedgerService {
           currency: leg.amount.currency,
         }));
 
+        await this.lockAccountsAtRisk(tx, postedLegs, accounts);
+
         const entry = await this.repository.insertEntry(tx, {
           id: entryId,
           bookId,
@@ -375,6 +377,9 @@ export class LedgerService {
         currency: posting.currency,
       }));
 
+      const accounts = await this.accountsOfLegs(tx, legs);
+      await this.lockAccountsAtRisk(tx, legs, accounts);
+
       const reversal = await this.repository.insertEntry(tx, {
         id: this.newId(),
         bookId,
@@ -401,7 +406,7 @@ export class LedgerService {
       // A reversal is not exempt. An entry that cannot be reversed without overdrawing an
       // account is one whose reversal alone is not the correction, and the error says how
       // much has to be deposited first.
-      await this.assertNoOverdraft(tx, legs, await this.accountsOfLegs(tx, legs));
+      await this.assertNoOverdraft(tx, legs, accounts);
 
       return reversal;
     });
@@ -575,6 +580,25 @@ export class LedgerService {
     }
 
     return byId;
+  }
+
+  /**
+   * Locks every guarded account this entry could overdraw, before anything is written.
+   *
+   * Before, not after: a lock taken after the insert would still leave the read that decides
+   * the entry's fate outside any mutual exclusion, which is the whole bug. Only the accounts
+   * carrying a negative leg are locked, and that is sufficient - two transactions can only
+   * jointly overdraw an account if both take money out of it, and both of those arrive here.
+   * A concurrent *positive* posting is unlocked and unseen, which is conservative rather than
+   * wrong: adding a positive posting at time T raises the prefixes at or after T and lowers
+   * none.
+   */
+  private async lockAccountsAtRisk(
+    tx: Executor,
+    legs: readonly PostedLeg[],
+    known: ReadonlyMap<string, AccountRecord>,
+  ): Promise<void> {
+    await this.repository.lockAccounts(tx, guardedAccountsAtRisk(legs, known));
   }
 
   /**
