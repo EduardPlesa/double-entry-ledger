@@ -47,6 +47,8 @@ export interface ProblemDocument {
   readonly requestId: string;
   /** Field-level detail, on validation failures only. */
   readonly errors?: readonly ProblemDetail[];
+  /** Error-specific members. RFC 9457 allows these; see `error-middleware.ts`. */
+  readonly [member: string]: unknown;
 }
 
 export interface ProblemInput {
@@ -57,6 +59,11 @@ export interface ProblemInput {
   readonly instance: string;
   readonly requestId: string;
   readonly errors?: readonly ProblemDetail[] | undefined;
+  /**
+   * Extra members, merged in last. RFC 9457 calls these extension members and permits them
+   * explicitly; they are what lets a client react to an overdraft without parsing `detail`.
+   */
+  readonly extensions?: Readonly<Record<string, unknown>> | undefined;
 }
 
 export function problem(input: ProblemInput): ProblemDocument {
@@ -69,6 +76,7 @@ export function problem(input: ProblemInput): ProblemDocument {
     code: input.code,
     requestId: input.requestId,
     ...(input.errors !== undefined && input.errors.length > 0 ? { errors: input.errors } : {}),
+    ...(input.extensions ?? {}),
   };
 }
 
