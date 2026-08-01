@@ -325,6 +325,14 @@ export class LedgerService {
         throw new UnbalancedEntryError([], { cause: error });
       }
 
+      // The application check above should have caught this too. When the database raises it
+      // anyway, two writers raced and one of them lost at COMMIT - which is the failure mode
+      // this stage exists to characterise, and which the row locks below remove. Either way
+      // the entry is rejected, and the caller gets the same error class as the fast path.
+      if (hasSqlState(error, SQLSTATE.ACCOUNT_OVERDRAWN)) {
+        throw new AccountOverdrawnError('', null, null, { cause: error });
+      }
+
       throw error;
     }
   }

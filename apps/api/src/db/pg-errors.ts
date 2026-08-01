@@ -18,6 +18,8 @@ export const SQLSTATE = {
   HISTORY_IMMUTABLE: 'LG002',
   /** Ledger: an entry with no postings. Raised at COMMIT. */
   ENTRY_WITHOUT_POSTINGS: 'LG003',
+  /** Ledger: a guarded account would be left negative. Raised at COMMIT. */
+  ACCOUNT_OVERDRAWN: 'LG004',
 } as const;
 
 /** The subset of node-postgres' error we actually read. */
