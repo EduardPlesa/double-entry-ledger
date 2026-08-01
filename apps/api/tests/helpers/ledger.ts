@@ -116,19 +116,30 @@ export interface Leg {
 /**
  * Inserts an entry and its postings. Deliberately does not open or close a transaction:
  * whether these statements commit is the thing under test.
+ *
+ * `occurredAt` lets a caller seed history that does not describe the order it was recorded
+ * in, without ever issuing an UPDATE: entries are append-only from migration 0003 onward -
+ * `ledger_app` has no UPDATE privilege on the table at all, and the trigger would reject one
+ * even for the owner - so backdating has to happen at INSERT time or not at all.
  */
 export async function insertEntry(
   client: PoolClient,
   book: Book,
   legs: readonly Leg[],
-  options: { description?: string; externalId?: string | null } = {},
+  options: { description?: string; externalId?: string | null; occurredAt?: string } = {},
 ): Promise<string> {
   const entryId = newId();
 
   await client.query(
     `INSERT INTO entries (id, book_id, occurred_at, description, external_id)
-     VALUES ($1, $2, now(), $3, $4)`,
-    [entryId, book.bookId, options.description ?? 'test entry', options.externalId ?? null],
+     VALUES ($1, $2, coalesce($3, now()), $4, $5)`,
+    [
+      entryId,
+      book.bookId,
+      options.occurredAt ?? null,
+      options.description ?? 'test entry',
+      options.externalId ?? null,
+    ],
   );
 
   for (const leg of legs) {
