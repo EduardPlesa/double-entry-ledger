@@ -112,7 +112,16 @@ and the drizzle-kit config, which runs in its own process.
 
 The `.env` file is loaded by Node's `--env-file-if-exists`, not by a library, so importing
 the config module has no side effects and a real environment variable always wins over the
-file.
+file. `.env.example` lists every variable that is read, with the optional ones commented out
+at their defaults.
+
+`LEDGER_CONCURRENCY_STRATEGY` is the one worth knowing about here. It selects how the
+overdraft rule is kept true when two writers meet — `row-lock` (the default, and what ships)
+takes `SELECT ... FOR NO KEY UPDATE` on the accounts an entry draws from, so writers block;
+`serializable` drops the explicit locks, runs the transaction at `SERIALIZABLE` and retries
+on `40001`, so writers abort and try again. Both enforce the rule exactly and admit the same
+number of concurrent withdrawals; they differ in what the losers are told, which is the whole
+argument of `docs/adr/0004-concurrency-control.md`.
 
 ## Two connections, two roles
 
