@@ -31,6 +31,7 @@ export type DomainErrorCode =
   | 'FORBIDDEN'
   | 'ENTRY_NOT_FOUND'
   | 'ENTRY_ALREADY_REVERSED'
+  | 'ACCOUNT_OVERDRAWN'
   | 'EMAIL_ALREADY_REGISTERED'
   | 'USER_NOT_FOUND'
   | 'IDEMPOTENCY_KEY_IN_FLIGHT'
@@ -275,5 +276,43 @@ export class IdempotencyKeyReusedError extends DomainError {
 
   constructor(readonly key: string) {
     super(`idempotency key ${JSON.stringify(key)} was already used for a different request`);
+  }
+}
+
+/**
+ * A guarded account would be left negative at some point in its history.
+ *
+ * Not only at the end. `occurred_at` is asserted by the caller, so an entry recorded today
+ * can land in the past; a rule that constrained only the current balance would accept a
+ * backdated withdrawal that overdrew the account on the date it claims to describe. The
+ * check is over every prefix of the account's postings, ordered by `(occurred_at, id)`.
+ *
+ * Reversals are not exempt. An entry that cannot be reversed without breaking this is an
+ * entry whose reversal alone is not the correction - so the error carries the shortfall,
+ * which is exactly what has to be deposited first.
+ */
+export class AccountOverdrawnError extends DomainError {
+  readonly code = 'ACCOUNT_OVERDRAWN';
+
+  constructor(
+    readonly accountId: string,
+    /**
+     * How far below zero the balance falls, and in which currency. Null when the database
+     * raised LG004 rather than the application check: the trigger knows the number and this
+     * process does not, the same way `UnbalancedEntryError` handles LG001.
+     */
+    readonly shortfall: CurrencyImbalance | null,
+    /** When the balance first goes short. Null for the same reason as `shortfall`. */
+    readonly occurredAt: Date | null,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      shortfall === null
+        ? `account ${accountId} would be overdrawn: rejected by the database at COMMIT`
+        : `account ${accountId} would be overdrawn: its balance reaches ` +
+          `${shortfall.amountMinor.toString()} ${shortfall.currency}` +
+          `${occurredAt === null ? '' : ` at ${occurredAt.toISOString()}`}`,
+      options,
+    );
   }
 }

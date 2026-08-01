@@ -71,6 +71,15 @@ export interface TrialBalanceRow {
   readonly balanceMinor: bigint;
 }
 
+/**
+ * The lowest the account's balance ever gets, and when. `balanceMinor` is a running total,
+ * not a single posting: it is the sum of every posting up to and including that point.
+ */
+export interface LowestPrefix {
+  readonly balanceMinor: bigint;
+  readonly occurredAt: Date;
+}
+
 /** A posting joined to the entry that explains it, which is what a statement line is. */
 export interface PostingLine {
   readonly id: bigint;
@@ -125,6 +134,16 @@ export interface LedgerRepository {
   sumPostings(executor: Executor, accountId: string, asOf?: Date | undefined): Promise<bigint>;
   /** Sum of an account's postings up to and including a posting id. The cursor's opening balance. */
   sumPostingsThrough(executor: Executor, accountId: string, throughId: bigint): Promise<bigint>;
+  /**
+   * The minimum running balance over the account's history, or null if it has no postings.
+   * The overdraft rule is exactly `balanceMinor >= 0`.
+   */
+  lowestPrefixBalance(executor: Executor, accountId: string): Promise<LowestPrefix | null>;
+  /**
+   * Takes a row lock on each account, in ascending id order. Blocks until any transaction
+   * holding one commits or rolls back.
+   */
+  lockAccounts(executor: Executor, accountIds: readonly string[]): Promise<void>;
   listPostings(
     executor: Executor,
     accountId: string,
@@ -405,6 +424,99 @@ export class DrizzleLedgerRepository implements LedgerRepository {
       .where(and(eq(postings.accountId, accountId), lte(postings.id, throughId)));
 
     return BigInt(row?.total ?? '0');
+  }
+
+  /**
+   * The lowest point the account's balance ever reaches.
+   *
+   * A window function rather than a sum, because the overdraft rule is about every prefix of
+   * the account's history and not about its total. Those differ precisely when an entry is
+   * backdated - which `occurred_at` exists to allow - and the difference is a withdrawal that
+   * overdrew the account on the date it claims to describe while today's balance looks fine.
+   *
+   * `ORDER BY e.occurred_at, p.id`, and the tiebreaker is load-bearing. Two legs of one entry
+   * always share an `occurred_at`, so without it the window has no defined order among them
+   * and "the minimum prefix" is not a single number. `p.id` is a bigserial: a total order,
+   * consistent with the sequence rows were recorded in.
+   *
+   * Raw SQL rather than the query builder because drizzle has no window-function API, and
+   * writing it out is clearer than assembling it from fragments. It reads only `postings` and
+   * `entries`, both behind row-level security, so it must run inside a book-scoped
+   * transaction like everything else here.
+   */
+  async lowestPrefixBalance(executor: Executor, accountId: string): Promise<LowestPrefix | null> {
+    const result = await executor.execute<{ balance: string; occurred_at: Date }>(sql`
+      select running::text as balance, occurred_at
+      from (
+        select
+          sum(${postings.amountMinor}) over (
+            order by ${entries.occurredAt}, ${postings.id}
+            rows between unbounded preceding and current row
+          ) as running,
+          ${entries.occurredAt} as occurred_at
+        from ${postings}
+        join ${entries} on ${entries.id} = ${postings.entryId}
+        where ${postings.accountId} = ${accountId}
+      ) prefixes
+      order by running asc, occurred_at asc
+      limit 1
+    `);
+
+    const row = result.rows[0];
+    if (row === undefined) return null;
+
+    return { balanceMinor: BigInt(row.balance), occurredAt: new Date(row.occurred_at) };
+  }
+
+  /**
+   * Row locks on the accounts an entry could overdraw.
+   *
+   * The lock is on `accounts`, not on `postings`, and that is the point: the rows being
+   * inserted do not exist yet, so there is nothing there to lock. The account row is a
+   * pre-existing thing every writer to that account has to go through, which turns "check
+   * then insert" into a decision only one transaction can be making at a time.
+   *
+   * Two entries touching the same two accounts in opposite leg order must not take the locks
+   * in opposite orders, or they wait on each other forever. Two things stand between this
+   * method and that failure. `guardedAccountsAtRisk`, in the service, sorts the ids before
+   * they ever reach here - every caller this method actually has always hands it ids already
+   * in ascending order, and that is the mechanism the end-to-end test in
+   * `tests/concurrency/deadlock.test.ts` exercises. `ORDER BY id` below is this method's own,
+   * independent line of defence, for a caller that does not sort - which is exactly what the
+   * direct test alongside that one does, calling this method with the same two ids in
+   * deliberately reversed order on two genuinely concurrent connections.
+   *
+   * That direct test cannot, on the schema as it stands, tell `ORDER BY id` apart from its
+   * absence. `accounts` has two btree indexes that lead with `id` - the primary key, and the
+   * composite unique index this query actually plans against - and `EXPLAIN` shows the same
+   * plan, with no `Sort` node anywhere, whether this clause is present, absent, or reversed to
+   * `DESC` (which only flips the index scan to run backward). Postgres's own array-key
+   * handling for an indexed `IN (...)` already visits the matching rows in ascending `id`
+   * order regardless of the order the list was written in, so removing this clause and
+   * re-running the direct test - tried locally while fixing this comment - still shows no
+   * deadlock. `ORDER BY id` is kept anyway: it states the contract this method actually
+   * promises rather than one it happens to get for free from an index that could be dropped or
+   * reshaped later, and it is what would matter again the day that index stops leading with
+   * `id`.
+   *
+   * Nothing is returned. The rows are already known to the caller - this statement exists
+   * for its side effect, which is the honest description of a lock.
+   *
+   * Built with the query builder rather than a raw `sql` template. Embedding a plain JS array
+   * in a `sql` tag expands it positionally - `any(($1, $2))` - which Postgres parses as a row
+   * constructor, not an array, and rejects with `op ANY/ALL (array) requires array on right
+   * side` the moment two accounts are locked at once. `inArray` binds the ids as an actual
+   * array parameter instead.
+   */
+  async lockAccounts(executor: Executor, accountIds: readonly string[]): Promise<void> {
+    if (accountIds.length === 0) return;
+
+    await executor
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(inArray(accounts.id, [...accountIds]))
+      .orderBy(asc(accounts.id))
+      .for('update');
   }
 
   /**
