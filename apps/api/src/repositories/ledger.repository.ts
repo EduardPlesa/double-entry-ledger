@@ -476,11 +476,28 @@ export class DrizzleLedgerRepository implements LedgerRepository {
    * pre-existing thing every writer to that account has to go through, which turns "check
    * then insert" into a decision only one transaction can be making at a time.
    *
-   * `ORDER BY id` prevents deadlock. Two entries touching the same two accounts in opposite
-   * leg order would otherwise take the locks in opposite orders and wait on each other
-   * forever. Postgres plans `LockRows` above `Sort`, so a single statement with ORDER BY
-   * acquires in sorted order; `tests/concurrency/deadlock.test.ts` is what holds that claim
-   * up rather than trusting it.
+   * Two entries touching the same two accounts in opposite leg order must not take the locks
+   * in opposite orders, or they wait on each other forever. Two things stand between this
+   * method and that failure. `guardedAccountsAtRisk`, in the service, sorts the ids before
+   * they ever reach here - every caller this method actually has always hands it ids already
+   * in ascending order, and that is the mechanism the end-to-end test in
+   * `tests/concurrency/deadlock.test.ts` exercises. `ORDER BY id` below is this method's own,
+   * independent line of defence, for a caller that does not sort - which is exactly what the
+   * direct test alongside that one does, calling this method with the same two ids in
+   * deliberately reversed order on two genuinely concurrent connections.
+   *
+   * That direct test cannot, on the schema as it stands, tell `ORDER BY id` apart from its
+   * absence. `accounts` has two btree indexes that lead with `id` - the primary key, and the
+   * composite unique index this query actually plans against - and `EXPLAIN` shows the same
+   * plan, with no `Sort` node anywhere, whether this clause is present, absent, or reversed to
+   * `DESC` (which only flips the index scan to run backward). Postgres's own array-key
+   * handling for an indexed `IN (...)` already visits the matching rows in ascending `id`
+   * order regardless of the order the list was written in, so removing this clause and
+   * re-running the direct test - tried locally while fixing this comment - still shows no
+   * deadlock. `ORDER BY id` is kept anyway: it states the contract this method actually
+   * promises rather than one it happens to get for free from an index that could be dropped or
+   * reshaped later, and it is what would matter again the day that index stops leading with
+   * `id`.
    *
    * Nothing is returned. The rows are already known to the caller - this statement exists
    * for its side effect, which is the honest description of a lock.
