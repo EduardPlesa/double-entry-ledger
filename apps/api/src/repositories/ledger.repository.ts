@@ -71,6 +71,15 @@ export interface TrialBalanceRow {
   readonly balanceMinor: bigint;
 }
 
+/**
+ * The lowest the account's balance ever gets, and when. `balanceMinor` is a running total,
+ * not a single posting: it is the sum of every posting up to and including that point.
+ */
+export interface LowestPrefix {
+  readonly balanceMinor: bigint;
+  readonly occurredAt: Date;
+}
+
 /** A posting joined to the entry that explains it, which is what a statement line is. */
 export interface PostingLine {
   readonly id: bigint;
@@ -125,6 +134,11 @@ export interface LedgerRepository {
   sumPostings(executor: Executor, accountId: string, asOf?: Date | undefined): Promise<bigint>;
   /** Sum of an account's postings up to and including a posting id. The cursor's opening balance. */
   sumPostingsThrough(executor: Executor, accountId: string, throughId: bigint): Promise<bigint>;
+  /**
+   * The minimum running balance over the account's history, or null if it has no postings.
+   * The overdraft rule is exactly `balanceMinor >= 0`.
+   */
+  lowestPrefixBalance(executor: Executor, accountId: string): Promise<LowestPrefix | null>;
   listPostings(
     executor: Executor,
     accountId: string,
@@ -405,6 +419,48 @@ export class DrizzleLedgerRepository implements LedgerRepository {
       .where(and(eq(postings.accountId, accountId), lte(postings.id, throughId)));
 
     return BigInt(row?.total ?? '0');
+  }
+
+  /**
+   * The lowest point the account's balance ever reaches.
+   *
+   * A window function rather than a sum, because the overdraft rule is about every prefix of
+   * the account's history and not about its total. Those differ precisely when an entry is
+   * backdated - which `occurred_at` exists to allow - and the difference is a withdrawal that
+   * overdrew the account on the date it claims to describe while today's balance looks fine.
+   *
+   * `ORDER BY e.occurred_at, p.id`, and the tiebreaker is load-bearing. Two legs of one entry
+   * always share an `occurred_at`, so without it the window has no defined order among them
+   * and "the minimum prefix" is not a single number. `p.id` is a bigserial: a total order,
+   * consistent with the sequence rows were recorded in.
+   *
+   * Raw SQL rather than the query builder because drizzle has no window-function API, and
+   * writing it out is clearer than assembling it from fragments. It reads only `postings` and
+   * `entries`, both behind row-level security, so it must run inside a book-scoped
+   * transaction like everything else here.
+   */
+  async lowestPrefixBalance(executor: Executor, accountId: string): Promise<LowestPrefix | null> {
+    const result = await executor.execute<{ balance: string; occurred_at: Date }>(sql`
+      select running::text as balance, occurred_at
+      from (
+        select
+          sum(${postings.amountMinor}) over (
+            order by ${entries.occurredAt}, ${postings.id}
+            rows between unbounded preceding and current row
+          ) as running,
+          ${entries.occurredAt} as occurred_at
+        from ${postings}
+        join ${entries} on ${entries.id} = ${postings.entryId}
+        where ${postings.accountId} = ${accountId}
+      ) prefixes
+      order by running asc, occurred_at asc
+      limit 1
+    `);
+
+    const row = result.rows[0];
+    if (row === undefined) return null;
+
+    return { balanceMinor: BigInt(row.balance), occurredAt: new Date(row.occurred_at) };
   }
 
   /**
