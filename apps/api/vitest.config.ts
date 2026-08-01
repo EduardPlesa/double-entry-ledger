@@ -1,12 +1,14 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * Two projects, because two kinds of test.
+ * Three projects, because three kinds of test.
  *
  * `unit` is pure computation - configuration parsing, the policy map, hashing, token
  * encoding - and needs nothing but Node. `integration` needs a real Postgres, which means
  * a container, which means a Docker daemon and about seven seconds before the first
- * assertion runs.
+ * assertion runs. `concurrency` also needs that container, but not the single-worker
+ * discipline `integration` runs under: its tests are the ones firing overlapping
+ * transactions at the same pool on purpose, so it gets its own process pool instead.
  *
  * Keeping them apart is not tidiness. A single project means a global setup that starts a
  * container for every run, so checking whether a regex is right requires Docker to be up -
@@ -37,6 +39,24 @@ export default defineConfig({
           // instead, but running them in a single process keeps failures readable and
           // connection counts sane.
           pool: 'threads',
+          fileParallelism: false,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
+          name: 'concurrency',
+          include: ['tests/concurrency/**/*.test.ts'],
+          globalSetup: ['./tests/setup/postgres.global.ts'],
+
+          testTimeout: 60_000,
+          hookTimeout: 120_000,
+
+          // Genuinely concurrent connections are the subject, so these cannot share the
+          // single-worker discipline of the integration project: every test here opens its
+          // own pool and fires overlapping transactions through it. One file at a time, so
+          // two files are never contending for the same container's connection slots.
+          pool: 'forks',
           fileParallelism: false,
           maxWorkers: 1,
         },
