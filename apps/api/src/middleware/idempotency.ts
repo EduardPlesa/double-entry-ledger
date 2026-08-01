@@ -19,6 +19,10 @@ import type { IdempotencyRepository } from '../repositories/idempotency.reposito
  * including the 422 the first attempt received. A client that times out and retries has no
  * idea which of those two situations it is in, which is exactly why it needs both.
  *
+ * With one exception, and `isReplayable` is where it is argued: an outcome that depends on the
+ * state of the ledger rather than on the request is not cached, because replaying it would
+ * pin an answer that has since stopped being true.
+ *
  * The reservation is inserted before the handler runs and committed on its own connection, so
  * it survives the handler's transaction rolling back. A reservation that vanished with the
  * failure it was recording would leave nothing to replay.
@@ -80,11 +84,8 @@ export function createIdempotency(dependencies: IdempotencyDependencies): Reques
         if (existing.requestFingerprint !== fingerprint) throw new IdempotencyKeyReusedError(key);
 
         if (existing.completedAt !== null) {
-          // A 5xx is not an outcome worth replaying: it says the server failed, not that the
-          // request was refused. The row is completed rather than left dangling so the key
-          // does not answer 409 forever, and a retry re-runs and overwrites it.
-          if (existing.status !== null && existing.status < 500) {
-            replay(response, existing.status, existing.responseBody);
+          if (isReplayable(existing.status, existing.responseBody)) {
+            replay(response, existing.status ?? 200, existing.responseBody);
             return;
           }
         } else if (now.getTime() - existing.createdAt.getTime() < ABANDONED_AFTER_MS) {
@@ -151,6 +152,37 @@ function captureAndComplete(
         response.req.log.error({ err: error, key }, 'failed to complete idempotency reservation');
       });
   });
+}
+
+/**
+ * Whether a finished reservation's answer may be handed to a retry.
+ *
+ * **The cache is for outcomes that are a function of the request.** Almost every 4xx here is:
+ * an unbalanced entry is unbalanced whoever asks and whenever, a reused key is reused, a
+ * malformed body stays malformed. Replaying those costs the caller nothing, because re-running
+ * them would produce the identical answer at the price of doing the work again.
+ *
+ * Two kinds of answer are not a function of the request, and both are excluded.
+ *
+ * A 5xx says the server failed, not that the request was refused - it is not an outcome at
+ * all. The row is still completed rather than left dangling, so the key does not answer 409
+ * forever, and a retry re-runs and overwrites it.
+ *
+ * `ACCOUNT_OVERDRAWN` is the system's first *state-dependent* 4xx, and it is excluded for a
+ * different reason: the same body succeeds or fails depending on the account's balance, which
+ * anything else in the book can change at any moment. Caching it would pin an answer that has
+ * since stopped being true - and pin it against precisely the client doing the right thing,
+ * who gets a 422, deposits the shortfall the response told them about, retries under the same
+ * key exactly as an idempotency key is meant to be used, and is handed the stale refusal
+ * forever. The key still does what it promises here: it guarantees the withdrawal happens at
+ * most once, which is the property that matters, and it is the response rather than the effect
+ * that is allowed to differ between attempts.
+ */
+function isReplayable(status: number | null, body: unknown): boolean {
+  if (status === null || status >= 500) return false;
+
+  const { code } = (body ?? {}) as { code?: unknown };
+  return code !== 'ACCOUNT_OVERDRAWN';
 }
 
 function replay(response: Response, status: number, body: unknown): void {
