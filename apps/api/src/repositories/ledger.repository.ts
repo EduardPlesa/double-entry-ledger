@@ -140,8 +140,10 @@ export interface LedgerRepository {
    */
   lowestPrefixBalance(executor: Executor, accountId: string): Promise<LowestPrefix | null>;
   /**
-   * Takes a row lock on each account, in ascending id order. Blocks until any transaction
-   * holding one commits or rolls back.
+   * Takes a `FOR NO KEY UPDATE` row lock on each account, in ascending id order. Blocks until
+   * any transaction holding a conflicting lock commits or rolls back. The mode matters and the
+   * implementation explains why: `FOR UPDATE` would conflict with the `FOR KEY SHARE` a
+   * posting's foreign key check takes on the same rows.
    */
   lockAccounts(executor: Executor, accountIds: readonly string[]): Promise<void>;
   listPostings(
@@ -476,6 +478,21 @@ export class DrizzleLedgerRepository implements LedgerRepository {
    * pre-existing thing every writer to that account has to go through, which turns "check
    * then insert" into a decision only one transaction can be making at a time.
    *
+   * `FOR NO KEY UPDATE`, and the choice of mode is load-bearing rather than cautious. Only the
+   * accounts an entry takes money *out* of are locked here, but an entry writes postings to
+   * every account it touches, and inserting a posting makes Postgres verify
+   * `postings_account_same_book_currency_fk` against the parent row - which it does by taking
+   * `FOR KEY SHARE` on that `accounts` row. That is a lock this code never requests and never
+   * gets to order. `FOR UPDATE` conflicts with `FOR KEY SHARE`, so under it a transfer of
+   * `[cash -1, bank +1]` held `cash` explicitly and then waited on `bank` implicitly, while
+   * the mirrored `[bank -1, cash +1]` did the reverse, and Postgres broke the tie with a
+   * 40P01 on a pair of entirely legitimate transfers. `FOR NO KEY UPDATE` still conflicts with
+   * itself - two withdrawals from one account serialise exactly as before, which is the only
+   * thing the lock is here to do - but it does not conflict with `FOR KEY SHARE`, so foreign
+   * key checks and concurrent deposits pass straight through. The crossed-transfer test in
+   * `tests/concurrency/deadlock.test.ts` is the before-and-after: it reproduces a real 40P01
+   * against `for update` and passes against this.
+   *
    * Two entries touching the same two accounts in opposite leg order must not take the locks
    * in opposite orders, or they wait on each other forever. Two things stand between this
    * method and that failure. `guardedAccountsAtRisk`, in the service, sorts the ids before
@@ -516,7 +533,7 @@ export class DrizzleLedgerRepository implements LedgerRepository {
       .from(accounts)
       .where(inArray(accounts.id, [...accountIds]))
       .orderBy(asc(accounts.id))
-      .for('update');
+      .for('no key update');
   }
 
   /**

@@ -25,8 +25,9 @@ export type Executor = PgDatabase<
 /**
  * How the overdraft rule is kept true when two writers meet.
  *
- * `row-lock`: the service takes `SELECT ... FOR UPDATE` on the accounts at risk and this
- * wrapper does nothing special. Writers block.
+ * `row-lock`: the service takes `SELECT ... FOR NO KEY UPDATE` on the accounts at risk and
+ * this wrapper does nothing special. Writers block. The mode is the weaker one deliberately -
+ * `lockAccounts` explains why `FOR UPDATE` deadlocks against a posting's own foreign key check.
  *
  * `serializable`: no explicit locks; Postgres detects the conflict and aborts one of the
  * transactions with 40001, which this wrapper retries. Writers abort and try again.
@@ -162,7 +163,15 @@ export class DrizzleUnitOfWork implements UnitOfWork {
       }
     }
 
-    throw last;
+    // `last` is only unset if the loop never ran, which needs `maxAttempts` below 1. Throwing
+    // it bare would then throw `undefined` - an unhandled rejection with no message, no stack
+    // and no SQLSTATE, from a misconfiguration that deserves to name itself.
+    throw (
+      last ??
+      new Error(
+        `withRetry ran no attempts: maxAttempts is ${this.maxAttempts.toString()}, which must be at least 1`,
+      )
+    );
   }
 }
 
