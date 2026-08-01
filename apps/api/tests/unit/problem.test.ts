@@ -2,6 +2,7 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import {
   AccountClosedError,
+  AccountOverdrawnError,
   BookNotFoundError,
   EntryAlreadyReversedError,
   ForbiddenError,
@@ -11,7 +12,7 @@ import {
   UnbalancedEntryError,
   ValidationError,
 } from '../../src/domain/errors.js';
-import { PROBLEM_CONTENT_TYPE } from '../../src/http/problem.js';
+import { PROBLEM_CONTENT_TYPE, problem } from '../../src/http/problem.js';
 import { createTestApp, route } from '../helpers/http.js';
 
 /**
@@ -86,6 +87,49 @@ describe('problem documents', () => {
   });
 });
 
+describe('extension members', () => {
+  // `problem()` itself, not the pipeline: RFC 9457 extension members are a general
+  // mechanism - the overdraft is only the first error to use it - so this is about the
+  // merge, not about any one domain error's shape.
+  it('are merged into the document alongside the core RFC 9457 fields', () => {
+    const document = problem({
+      status: 422,
+      title: 'Account would be overdrawn',
+      detail: 'the account would go negative',
+      code: 'ACCOUNT_OVERDRAWN',
+      instance: '/boom',
+      requestId: 'request-1',
+      extensions: { accountId: 'acct-1', shortfall: '-2.50' },
+    });
+
+    expect(document).toMatchObject({
+      type: 'https://ledger.local/problems/account-overdrawn',
+      title: 'Account would be overdrawn',
+      status: 422,
+      detail: 'the account would go negative',
+      code: 'ACCOUNT_OVERDRAWN',
+      instance: '/boom',
+      requestId: 'request-1',
+      accountId: 'acct-1',
+      shortfall: '-2.50',
+    });
+  });
+
+  it('add nothing to the document when there are none', () => {
+    const document = problem({
+      status: 404,
+      title: 'Book not found',
+      detail: 'no such book',
+      code: 'BOOK_NOT_FOUND',
+      instance: '/boom',
+      requestId: 'request-1',
+    });
+
+    expect(document).not.toHaveProperty('accountId');
+    expect(document).not.toHaveProperty('shortfall');
+  });
+});
+
 describe('the status map', () => {
   it('answers 400 for a request that does not parse and 422 for one that cannot be done', async () => {
     // The distinction the stage brief asks for, and a real one: a 400 is fixable by
@@ -135,6 +179,29 @@ describe('the status map', () => {
 
     expect(closed.status).toBe(422);
     expect(cursor.status).toBe(400);
+  });
+
+  it('answers 422 for an overdrawn account, with the shortfall as a decimal string', async () => {
+    // The one domain error with extension members, and the one place a refactor could
+    // silently reintroduce a JS `number` for an amount. `-250n` minor units of EUR must
+    // come out as the string "-2.50", never the number -2.5.
+    const response = await request(
+      appThrowing(
+        new AccountOverdrawnError(
+          'acct-1',
+          { currency: 'EUR', amountMinor: -250n },
+          new Date('2026-03-01T12:00:00.000Z'),
+        ),
+      ),
+    ).post('/boom');
+
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe('ACCOUNT_OVERDRAWN');
+    expect(response.body.accountId).toBe('acct-1');
+    expect(response.body.currency).toBe('EUR');
+    expect(response.body.occurredAt).toBe('2026-03-01T12:00:00.000Z');
+    expect(response.body.shortfall).toBe('-2.50');
+    expect(typeof response.body.shortfall).toBe('string');
   });
 });
 
