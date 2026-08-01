@@ -203,6 +203,114 @@ describe('a retried request', () => {
   });
 });
 
+describe('a refusal that depends on the state of the ledger', () => {
+  /**
+   * The one 4xx that is not cached, and the sequence that explains why.
+   *
+   * Every other refusal this middleware replays is a function of the request alone: an
+   * unbalanced entry is unbalanced whoever asks and whenever, so replaying it costs nothing and
+   * saves the work of deciding again. `ACCOUNT_OVERDRAWN` is the first one in the system that
+   * is not - the same bytes succeed or fail depending on a balance that anything else in the
+   * book can change a moment later.
+   *
+   * So this is the sequence a correct client performs, and the one caching would break: take
+   * the 422, read the shortfall out of it, deposit exactly that, and retry under the same key -
+   * which is what an idempotency key is *for*, since the client still cannot know whether the
+   * original withdrawal happened. Replaying the stored 422 would hand them a refusal that
+   * stopped being true the moment they acted on it, and would keep handing it to them forever.
+   *
+   * What the key still guarantees is the part that matters: the withdrawal happens at most
+   * once. It is the response that is allowed to differ between attempts, not the effect.
+   */
+  it('is re-run rather than replayed, so a retry sees the balance as it now is', async () => {
+    const solvent = await createBook(application, owner);
+    const account = await createAccount(application, solvent, { name: 'Cash', type: 'asset' });
+    const revenue = await createAccount(application, solvent, { name: 'Sales', type: 'revenue' });
+    const expense = await createAccount(application, solvent, { name: 'Rent', type: 'expense' });
+
+    const key = uniqueKey();
+    const withdrawal = {
+      occurredAt: '2026-03-01T12:00:00.000Z',
+      description: `withdrawal-${key}`,
+      legs: [
+        { accountId: account, amount: '-50.00', currency: 'EUR' },
+        { accountId: expense, amount: '50.00', currency: 'EUR' },
+      ],
+    };
+
+    // Nothing in the account yet, so this cannot be afforded.
+    const refused = await api()
+      .post(`/books/${solvent.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', key)
+      .send(withdrawal);
+
+    expect(refused.status).toBe(422);
+    expect(refused.body.code).toBe('ACCOUNT_OVERDRAWN');
+
+    await completed(key);
+
+    // The client does what the error told them to.
+    const deposit = await api()
+      .post(`/books/${solvent.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', uniqueKey())
+      .send({
+        occurredAt: '2026-02-01T12:00:00.000Z',
+        description: `funding-${key}`,
+        legs: [
+          { accountId: account, amount: '100.00', currency: 'EUR' },
+          { accountId: revenue, amount: '-100.00', currency: 'EUR' },
+        ],
+      });
+
+    expect(deposit.status).toBe(201);
+
+    // The same request, the same key, and now it is affordable.
+    const retried = await api()
+      .post(`/books/${solvent.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', key)
+      .send(withdrawal);
+
+    expect(retried.status).toBe(201);
+    expect(retried.headers[REPLAYED_HEADER.toLowerCase()]).toBeUndefined();
+
+    // And exactly once, which is the promise the key actually makes.
+    const rows = await countEntriesDescribed(solvent.bookId, `withdrawal-${key}`);
+    expect(rows[0]?.n).toBe('1');
+  });
+
+  it('still replays a refusal that does not depend on state, which is the contrast', async () => {
+    // Same status, same endpoint, opposite treatment - and the difference is entirely whether
+    // re-running could produce a different answer. This one could not.
+    const key = uniqueKey();
+    const unbalanced = sale({
+      legs: [
+        { accountId: cash, amount: '10.00', currency: 'EUR' },
+        { accountId: sales, amount: '-9.98', currency: 'EUR' },
+      ],
+    });
+
+    await api()
+      .post(`/books/${book.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', key)
+      .send(unbalanced);
+
+    await completed(key);
+
+    const second = await api()
+      .post(`/books/${book.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', key)
+      .send(unbalanced);
+
+    expect(second.status).toBe(422);
+    expect(second.headers[REPLAYED_HEADER.toLowerCase()]).toBe('true');
+  });
+});
+
 describe('the same key for a different request', () => {
   it('is refused as a client bug rather than answered with the first response', async () => {
     // Replaying here would hand back the result of a request the caller did not make, which
