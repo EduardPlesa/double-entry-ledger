@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { GUARDED_ACCOUNT_TYPES } from '../../src/domain/overdraft.js';
@@ -116,5 +117,115 @@ describe('LG004, deferred to COMMIT', () => {
         await client.query('COMMIT');
       }),
     ).rejects.toMatchObject({ code: ACCOUNT_OVERDRAWN });
+  });
+});
+
+/**
+ * Migration 0007's validation block, run against data that violates the rule.
+ *
+ * `CREATE CONSTRAINT TRIGGER` binds future inserts and says nothing about the rows already in
+ * the table, so applying 0007 to a database that is already in violation would have succeeded
+ * and left the violation in place - where the service's negative-leg-only optimisation cannot
+ * see it and a later *deposit* trips the trigger at COMMIT with no account id and no shortfall
+ * to report. The `DO` block exists to make applying the migration establish the assumption the
+ * optimisation rests on.
+ *
+ * Every migration run in this suite exercises the passing half of that already: the block runs
+ * against a clean database on the way to every test in the project. What it cannot show is
+ * that the block would *catch* anything, and a validation that silently passes on everything
+ * is indistinguishable from no validation at all. So this reaches for the one role that can
+ * manufacture the situation - `ledger_owner` owns `postings` and can therefore disable the
+ * trigger that would otherwise make a negative account unrepresentable - and then runs the
+ * migration's own text, extracted from the file rather than retyped, so that this cannot drift
+ * away from what actually ships.
+ *
+ * The whole thing is rolled back. Nothing else in the suite ever sees the account.
+ */
+describe("migration 0007's validation of the rows that were already there", () => {
+  let ownerPool: Pool;
+
+  beforeAll(() => {
+    ownerPool = new Pool({ connectionString: inject('ownerUrl'), max: 2 });
+  });
+
+  afterAll(async () => {
+    await ownerPool.end();
+  });
+
+  /** The `DO $$ ... $$` statement out of the migration, so the test cannot drift from it. */
+  function validationBlock(): string {
+    const migration = readFileSync(
+      new URL('../../drizzle/0007_overdraft.sql', import.meta.url),
+      'utf8',
+    );
+
+    // By content rather than by position, and the leading comment block comes along with it:
+    // the statement is what the migrator sends, comments included, so this stays the same
+    // text even if the file is reordered or the commentary is rewritten.
+    const block = migration
+      .split('--> statement-breakpoint')
+      .map((statement) => statement.trim())
+      .find((statement) => /^DO \$\$/m.test(statement));
+
+    if (block === undefined) {
+      throw new Error('0007_overdraft.sql no longer contains a DO block to validate with');
+    }
+
+    return block;
+  }
+
+  it('raises LG004 naming the account that is already negative', async () => {
+    const attempt = withClient(ownerPool, async (client) => {
+      await client.query('BEGIN');
+      try {
+        const book = await seedBook(client);
+
+        // Without this the insert below is simply impossible, which is the point of the
+        // trigger - and exactly why the pre-existing rows it never saw need their own check.
+        await client.query('ALTER TABLE postings DISABLE TRIGGER postings_account_not_overdrawn');
+
+        await insertEntry(
+          client,
+          book,
+          [
+            { accountId: book.cash, amountMinor: -2500n },
+            { accountId: book.sales, amountMinor: 2500n },
+          ],
+          { occurredAt: '2026-01-01T00:00:00.000Z' },
+        );
+
+        await client.query(validationBlock());
+      } finally {
+        // Rolled back whether the block raised or not: the disabled trigger and the negative
+        // account both disappear with the transaction.
+        await client.query('ROLLBACK');
+      }
+    });
+
+    await expect(attempt).rejects.toMatchObject({ code: ACCOUNT_OVERDRAWN });
+  });
+
+  it('passes over an account that never goes short', async () => {
+    await withClient(ownerPool, async (client) => {
+      await client.query('BEGIN');
+      try {
+        const book = await seedBook(client);
+
+        await insertEntry(
+          client,
+          book,
+          [
+            { accountId: book.cash, amountMinor: 2500n },
+            { accountId: book.sales, amountMinor: -2500n },
+          ],
+          { occurredAt: '2026-01-01T00:00:00.000Z' },
+        );
+
+        // No exception, and that is the assertion: a healthy book applies the migration.
+        await client.query(validationBlock());
+      } finally {
+        await client.query('ROLLBACK');
+      }
+    });
   });
 });
