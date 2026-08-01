@@ -62,7 +62,7 @@ export function createApplication(
 ): Application {
   const pool = createPool(config.database.url, config.database.poolMax);
   const db = createDatabase(pool);
-  const unitOfWork = new DrizzleUnitOfWork(db);
+  const unitOfWork = new DrizzleUnitOfWork(db, { strategy: config.concurrency.strategy });
   const clock = overrides.clock ?? systemClock;
   const logger = overrides.logger ?? createLogger(config);
 

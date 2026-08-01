@@ -80,6 +80,12 @@ const envSchema = z
 
     DATABASE_POOL_MAX: positiveInt.max(1000).default(10),
 
+    /**
+     * How the overdraft rule is made safe under concurrency. Row locks by default; see
+     * docs/adr/0004-concurrency-control.md for why, and for what the other one costs.
+     */
+    LEDGER_CONCURRENCY_STRATEGY: z.enum(['row-lock', 'serializable']).default('row-lock'),
+
     /** Signs and verifies access tokens. Symmetric: one service does both. */
     AUTH_JWT_SECRET: secret,
     AUTH_JWT_ISSUER: z.string().min(1).default('ledger'),
@@ -156,6 +162,10 @@ export interface DatabaseConfig {
   readonly poolMax: number;
 }
 
+export interface ConcurrencyConfig {
+  readonly strategy: 'row-lock' | 'serializable';
+}
+
 export interface Argon2Config {
   readonly memoryCostKib: number;
   readonly timeCost: number;
@@ -193,6 +203,7 @@ export interface Config {
   readonly port: number;
   readonly logLevel: z.infer<typeof logLevel>;
   readonly database: DatabaseConfig;
+  readonly concurrency: ConcurrencyConfig;
   readonly auth: AuthConfig;
   readonly apiKeyEnvironment: ApiKeyEnvironment;
 }
@@ -229,6 +240,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
       migrationUrl: env.DATABASE_MIGRATION_URL,
       poolMax: env.DATABASE_POOL_MAX,
     }),
+    concurrency: Object.freeze({ strategy: env.LEDGER_CONCURRENCY_STRATEGY }),
     auth: Object.freeze({
       jwtSecret: env.AUTH_JWT_SECRET,
       jwtIssuer: env.AUTH_JWT_ISSUER,

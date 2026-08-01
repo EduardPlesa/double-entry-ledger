@@ -2,6 +2,7 @@ import { sql, type ExtractTablesWithRelations } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase, type NodePgQueryResultHKT } from 'drizzle-orm/node-postgres';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
 import { Pool } from 'pg';
+import { SQLSTATE, hasSqlState } from './pg-errors.js';
 import * as schema from './schema.js';
 
 export type Database = NodePgDatabase<typeof schema>;
@@ -20,6 +21,27 @@ export type Executor = PgDatabase<
   typeof schema,
   ExtractTablesWithRelations<typeof schema>
 >;
+
+/**
+ * How the overdraft rule is kept true when two writers meet.
+ *
+ * `row-lock`: the service takes `SELECT ... FOR UPDATE` on the accounts at risk and this
+ * wrapper does nothing special. Writers block.
+ *
+ * `serializable`: no explicit locks; Postgres detects the conflict and aborts one of the
+ * transactions with 40001, which this wrapper retries. Writers abort and try again.
+ *
+ * Both are correct. They are different bets about which is cheaper, and the ADR has numbers.
+ */
+export type ConcurrencyStrategy = 'row-lock' | 'serializable';
+
+export interface UnitOfWorkOptions {
+  readonly strategy?: ConcurrencyStrategy;
+  /** Total attempts, not retries. Exceeding it rethrows the last 40001. */
+  readonly maxAttempts?: number;
+  /** Called before each retry. Exists so a test can assert the retry path actually ran. */
+  readonly onRetry?: (attempt: number, error: unknown) => void;
+}
 
 /**
  * Transaction boundaries as a dependency.
@@ -54,25 +76,37 @@ export interface UnitOfWork {
    * this handle does not fail; it quietly returns nothing, which is worse.
    */
   readonly executor: Executor;
+
+  /** Which concurrency strategy is in force. The service skips its row locks under `serializable`. */
+  readonly strategy: ConcurrencyStrategy;
 }
 
 export class DrizzleUnitOfWork implements UnitOfWork {
-  constructor(private readonly db: Database) {}
+  readonly strategy: ConcurrencyStrategy;
+  private readonly maxAttempts: number;
+  private readonly onRetry: ((attempt: number, error: unknown) => void) | undefined;
+
+  constructor(
+    private readonly db: Database,
+    options: UnitOfWorkOptions = {},
+  ) {
+    this.strategy = options.strategy ?? 'row-lock';
+    this.maxAttempts = options.maxAttempts ?? 5;
+    this.onRetry = options.onRetry;
+  }
 
   get executor(): Executor {
     return this.db;
   }
 
   /**
-   * READ COMMITTED, which is the Postgres default and is deliberately not overridden here.
-   * Stage 4 introduces a rule - an account type that may not go negative - that READ
-   * COMMITTED cannot enforce, demonstrates the failure with a concurrent test, and only
-   * then decides between row locks and SERIALIZABLE. Choosing an isolation level before
-   * there is a constraint that needs one is how projects end up with SERIALIZABLE
-   * everywhere and no idea which query needed it.
+   * READ COMMITTED by default, which is the Postgres default and is deliberately not
+   * overridden: stage 4 demonstrated that it cannot enforce the overdraft rule on its own,
+   * and then fixed that with locks rather than by raising the isolation level everywhere.
+   * Under the `serializable` strategy this becomes SERIALIZABLE and 40001 is retried.
    */
   async transaction<T>(work: (tx: Executor) => Promise<T>): Promise<T> {
-    return this.db.transaction(async (tx) => work(tx));
+    return this.withRetry(() => this.db.transaction(async (tx) => work(tx), this.options()));
   }
 
   /**
@@ -84,12 +118,51 @@ export class DrizzleUnitOfWork implements UnitOfWork {
    * connection would outlive the request that set it and still be in place for whichever
    * request borrowed the connection next, which is a cross-book data leak whose cause looks
    * entirely innocent at the call site.
+   *
+   * The whole body is what gets retried, `set_config` included: a retry is a fresh
+   * transaction, and a fresh transaction has no book context until it sets one.
    */
   async transactionInBook<T>(bookId: string, work: (tx: Executor) => Promise<T>): Promise<T> {
-    return this.db.transaction(async (tx) => {
-      await tx.execute(sql`select set_config('app.current_book_id', ${bookId}, true)`);
-      return work(tx);
-    });
+    return this.withRetry(() =>
+      this.db.transaction(async (tx) => {
+        await tx.execute(sql`select set_config('app.current_book_id', ${bookId}, true)`);
+        return work(tx);
+      }, this.options()),
+    );
+  }
+
+  private options(): { isolationLevel?: 'serializable' } {
+    return this.strategy === 'serializable' ? { isolationLevel: 'serializable' } : {};
+  }
+
+  /**
+   * Retries a transaction that Postgres refused to serialize.
+   *
+   * Only 40001, and only under the serializable strategy. Not 40P01: a deadlock means two
+   * transactions took locks in incompatible orders, which is a bug in the lock ordering
+   * rather than bad luck, and retrying it would hide the bug behind a slow success.
+   *
+   * The caller's `work` runs again from the top, so anything it must not repeat has to be
+   * computed outside it. `postEntry` does exactly that with the entry id and `recordedAt`:
+   * a retried post is the same entry, not a new one.
+   */
+  private async withRetry<T>(run: () => Promise<T>): Promise<T> {
+    if (this.strategy !== 'serializable') return run();
+
+    let last: unknown;
+
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        if (!hasSqlState(error, SQLSTATE.SERIALIZATION_FAILURE)) throw error;
+
+        last = error;
+        this.onRetry?.(attempt, error);
+      }
+    }
+
+    throw last;
   }
 }
 

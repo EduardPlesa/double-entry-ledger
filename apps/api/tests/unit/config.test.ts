@@ -8,19 +8,21 @@ import { ConfigError, loadConfig } from '../../src/config.js';
  * report on this machine.
  */
 
-const valid = {
-  DATABASE_URL: 'postgres://ledger_app:pw@localhost:5433/ledger',
-  DATABASE_MIGRATION_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
-  AUTH_JWT_SECRET: 'a'.repeat(32),
-  AUTH_REFRESH_TOKEN_PEPPER: 'b'.repeat(32),
-};
+function validEnv(): Record<string, string> {
+  return {
+    DATABASE_URL: 'postgres://ledger_app:pw@localhost:5433/ledger',
+    DATABASE_MIGRATION_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
+    AUTH_JWT_SECRET: 'a'.repeat(32),
+    AUTH_REFRESH_TOKEN_PEPPER: 'b'.repeat(32),
+  };
+}
 
 describe('loadConfig', () => {
   it('reads the two connection strings and applies defaults for the rest', () => {
-    const config = loadConfig(valid);
+    const config = loadConfig(validEnv());
 
-    expect(config.database.url).toBe(valid.DATABASE_URL);
-    expect(config.database.migrationUrl).toBe(valid.DATABASE_MIGRATION_URL);
+    expect(config.database.url).toBe(validEnv().DATABASE_URL);
+    expect(config.database.migrationUrl).toBe(validEnv().DATABASE_MIGRATION_URL);
     expect(config.database.poolMax).toBe(10);
     expect(config.nodeEnv).toBe('development');
     expect(config.isProduction).toBe(false);
@@ -29,23 +31,23 @@ describe('loadConfig', () => {
   });
 
   it('coerces the numeric variables, which arrive as strings', () => {
-    const config = loadConfig({ ...valid, PORT: '8080', DATABASE_POOL_MAX: '25' });
+    const config = loadConfig({ ...validEnv(), PORT: '8080', DATABASE_POOL_MAX: '25' });
 
     expect(config.port).toBe(8080);
     expect(config.database.poolMax).toBe(25);
   });
 
   it('throws when a required variable is missing, naming it', () => {
-    const { DATABASE_URL: _omitted, ...withoutUrl } = valid;
+    const { DATABASE_URL: _omitted, ...withoutUrl } = validEnv();
 
     expect(() => loadConfig(withoutUrl)).toThrow(ConfigError);
     expect(() => loadConfig(withoutUrl)).toThrow(/DATABASE_URL/);
   });
 
   it('rejects a connection string that is not a Postgres URL', () => {
-    expect(() => loadConfig({ ...valid, DATABASE_URL: 'not a url' })).toThrow(/must be a URL/);
+    expect(() => loadConfig({ ...validEnv(), DATABASE_URL: 'not a url' })).toThrow(/must be a URL/);
     expect(() =>
-      loadConfig({ ...valid, DATABASE_URL: 'mysql://ledger_app:pw@localhost:3306/ledger' }),
+      loadConfig({ ...validEnv(), DATABASE_URL: 'mysql://ledger_app:pw@localhost:3306/ledger' }),
     ).toThrow(/postgres:\/\//);
   });
 
@@ -55,7 +57,7 @@ describe('loadConfig', () => {
     // that capability back, so it fails here instead of in production.
     expect(() =>
       loadConfig({
-        ...valid,
+        ...validEnv(),
         DATABASE_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
         DATABASE_MIGRATION_URL: 'postgres://ledger_owner:pw@localhost:5433/ledger',
       }),
@@ -63,15 +65,15 @@ describe('loadConfig', () => {
   });
 
   it('rejects values outside their range, and non-numeric ports', () => {
-    expect(() => loadConfig({ ...valid, PORT: '0' })).toThrow(ConfigError);
-    expect(() => loadConfig({ ...valid, PORT: '99999' })).toThrow(ConfigError);
-    expect(() => loadConfig({ ...valid, PORT: 'http' })).toThrow(ConfigError);
-    expect(() => loadConfig({ ...valid, DATABASE_POOL_MAX: '0' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...validEnv(), PORT: '0' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...validEnv(), PORT: '99999' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...validEnv(), PORT: 'http' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...validEnv(), DATABASE_POOL_MAX: '0' })).toThrow(ConfigError);
   });
 
   it('rejects an unknown NODE_ENV rather than guessing', () => {
-    expect(() => loadConfig({ ...valid, NODE_ENV: 'staging' })).toThrow(ConfigError);
-    expect(loadConfig({ ...valid, NODE_ENV: 'production' }).isProduction).toBe(true);
+    expect(() => loadConfig({ ...validEnv(), NODE_ENV: 'staging' })).toThrow(ConfigError);
+    expect(loadConfig({ ...validEnv(), NODE_ENV: 'production' }).isProduction).toBe(true);
   });
 
   it('reports every problem at once, not the first', () => {
@@ -88,7 +90,7 @@ describe('loadConfig', () => {
   });
 
   it('returns a frozen object, so nothing can reconfigure the process at runtime', () => {
-    const config = loadConfig(valid);
+    const config = loadConfig(validEnv());
 
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.database)).toBe(true);
@@ -99,7 +101,7 @@ describe('loadConfig', () => {
 
 describe('loadConfig, authentication', () => {
   it('applies the defaults that have one', () => {
-    const { auth } = loadConfig(valid);
+    const { auth } = loadConfig(validEnv());
 
     expect(auth.jwtIssuer).toBe('ledger');
     expect(auth.jwtAudience).toBe('ledger-api');
@@ -109,8 +111,8 @@ describe('loadConfig, authentication', () => {
   });
 
   it('requires both secrets, with no default for either', () => {
-    const { AUTH_JWT_SECRET: _jwt, ...withoutJwt } = valid;
-    const { AUTH_REFRESH_TOKEN_PEPPER: _pepper, ...withoutPepper } = valid;
+    const { AUTH_JWT_SECRET: _jwt, ...withoutJwt } = validEnv();
+    const { AUTH_REFRESH_TOKEN_PEPPER: _pepper, ...withoutPepper } = validEnv();
 
     expect(() => loadConfig(withoutJwt)).toThrow(/AUTH_JWT_SECRET/);
     expect(() => loadConfig(withoutPepper)).toThrow(/AUTH_REFRESH_TOKEN_PEPPER/);
@@ -120,29 +122,48 @@ describe('loadConfig, authentication', () => {
     // Not a strength check - `'a'.repeat(32)` passes and is worthless. It rules out the
     // category of secret someone invents at the keyboard, and makes the placeholder in
     // .env.example fail rather than run.
-    expect(() => loadConfig({ ...valid, AUTH_JWT_SECRET: 'short' })).toThrow(/at least 32/);
+    expect(() => loadConfig({ ...validEnv(), AUTH_JWT_SECRET: 'short' })).toThrow(/at least 32/);
   });
 
   it('rejects one value used as both secrets', () => {
     // Both work perfectly well when they are the same, which is exactly why nothing else
     // would ever notice. One leak should not compromise signing and storage at once.
     expect(() =>
-      loadConfig({ ...valid, AUTH_REFRESH_TOKEN_PEPPER: valid.AUTH_JWT_SECRET }),
+      loadConfig({ ...validEnv(), AUTH_REFRESH_TOKEN_PEPPER: validEnv().AUTH_JWT_SECRET }),
     ).toThrow(/must differ from AUTH_JWT_SECRET/);
   });
 
   it('refuses an access-token lifetime long enough to stop being short-lived', () => {
     // "Just make it a day while I debug this" is a one-character change to an env file. It
     // should have to be argued for rather than typed.
-    expect(() => loadConfig({ ...valid, AUTH_ACCESS_TOKEN_TTL_SECONDS: '86400' })).toThrow(
+    expect(() => loadConfig({ ...validEnv(), AUTH_ACCESS_TOKEN_TTL_SECONDS: '86400' })).toThrow(
       ConfigError,
     );
-    expect(loadConfig({ ...valid, AUTH_ACCESS_TOKEN_TTL_SECONDS: '120' }).auth.accessTokenTtlSeconds).toBe(120);
+    expect(loadConfig({ ...validEnv(), AUTH_ACCESS_TOKEN_TTL_SECONDS: '120' }).auth.accessTokenTtlSeconds).toBe(120);
   });
 
   it('derives the API key environment label from NODE_ENV', () => {
-    expect(loadConfig(valid).apiKeyEnvironment).toBe('dev');
-    expect(loadConfig({ ...valid, NODE_ENV: 'test' }).apiKeyEnvironment).toBe('test');
-    expect(loadConfig({ ...valid, NODE_ENV: 'production' }).apiKeyEnvironment).toBe('live');
+    expect(loadConfig(validEnv()).apiKeyEnvironment).toBe('dev');
+    expect(loadConfig({ ...validEnv(), NODE_ENV: 'test' }).apiKeyEnvironment).toBe('test');
+    expect(loadConfig({ ...validEnv(), NODE_ENV: 'production' }).apiKeyEnvironment).toBe('live');
+  });
+});
+
+describe('LEDGER_CONCURRENCY_STRATEGY', () => {
+  it('defaults to row locks', () => {
+    expect(loadConfig(validEnv()).concurrency.strategy).toBe('row-lock');
+  });
+
+  it('accepts serializable', () => {
+    expect(
+      loadConfig({ ...validEnv(), LEDGER_CONCURRENCY_STRATEGY: 'serializable' }).concurrency
+        .strategy,
+    ).toBe('serializable');
+  });
+
+  it('rejects anything else', () => {
+    expect(() => loadConfig({ ...validEnv(), LEDGER_CONCURRENCY_STRATEGY: 'yolo' })).toThrow(
+      ConfigError,
+    );
   });
 });
