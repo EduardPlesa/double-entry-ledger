@@ -6,6 +6,7 @@ import {
   IdempotencyKeyInFlightError,
   IdempotencyKeyReusedError,
   ValidationError,
+  type DomainErrorCode,
 } from '../domain/errors.js';
 import { bookAccessOf } from '../http/context.js';
 import type { IdempotencyRepository } from '../repositories/idempotency.repository.js';
@@ -85,7 +86,7 @@ export function createIdempotency(dependencies: IdempotencyDependencies): Reques
 
         if (existing.completedAt !== null) {
           if (isReplayable(existing.status, existing.responseBody)) {
-            replay(response, existing.status ?? 200, existing.responseBody);
+            replay(response, existing.status, existing.responseBody);
             return;
           }
         } else if (now.getTime() - existing.createdAt.getTime() < ABANDONED_AFTER_MS) {
@@ -178,11 +179,14 @@ function captureAndComplete(
  * most once, which is the property that matters, and it is the response rather than the effect
  * that is allowed to differ between attempts.
  */
-function isReplayable(status: number | null, body: unknown): boolean {
+/** The one code this cache refuses to serve stale, typed so renaming it fails the build here too. */
+const NOT_REPLAYABLE_CODE: DomainErrorCode = 'ACCOUNT_OVERDRAWN';
+
+function isReplayable(status: number | null, body: unknown): status is number {
   if (status === null || status >= 500) return false;
 
   const { code } = (body ?? {}) as { code?: unknown };
-  return code !== 'ACCOUNT_OVERDRAWN';
+  return code !== NOT_REPLAYABLE_CODE;
 }
 
 function replay(response: Response, status: number, body: unknown): void {
