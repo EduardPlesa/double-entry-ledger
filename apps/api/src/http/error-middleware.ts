@@ -157,12 +157,17 @@ function toProblemDetails(error: ValidationError): readonly ProblemDetail[] {
  * client asks next, and making them parse it out of `detail` would be making them parse
  * English. The amount goes out as a decimal string like every other amount at this
  * boundary - a JSON number would be a double.
+ *
+ * `accountId` is omitted rather than sent empty when the database raised LG004 and this
+ * process never learned which account went short. A member that is absent says "not known";
+ * `accountId: ""` says "the account whose id is the empty string", which is a claim, and a
+ * false one. The remaining members are already null in that case for the same reason.
  */
 function extensionsOf(error: DomainError): Readonly<Record<string, unknown>> | undefined {
   if (!(error instanceof AccountOverdrawnError)) return undefined;
 
   return {
-    accountId: error.accountId,
+    ...(error.accountId === null ? {} : { accountId: error.accountId }),
     shortfall:
       error.shortfall === null
         ? null

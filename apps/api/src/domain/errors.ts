@@ -295,7 +295,13 @@ export class AccountOverdrawnError extends DomainError {
   readonly code = 'ACCOUNT_OVERDRAWN';
 
   constructor(
-    readonly accountId: string,
+    /**
+     * Which account went short. Null when the database raised LG004 rather than the
+     * application check, for the same reason `shortfall` is - and null rather than an empty
+     * string on purpose, because `accountId: ""` in a response reads as an answer instead of
+     * as the absence of one. The HTTP layer omits the member entirely when this is null.
+     */
+    readonly accountId: string | null,
     /**
      * How far below zero the balance falls, and in which currency. Null when the database
      * raised LG004 rather than the application check: the trigger knows the number and this
@@ -306,10 +312,12 @@ export class AccountOverdrawnError extends DomainError {
     readonly occurredAt: Date | null,
     options?: { cause?: unknown },
   ) {
+    const subject = accountId === null ? 'an account' : `account ${accountId}`;
+
     super(
       shortfall === null
-        ? `account ${accountId} would be overdrawn: rejected by the database at COMMIT`
-        : `account ${accountId} would be overdrawn: its balance reaches ` +
+        ? `${subject} would be overdrawn: rejected by the database at COMMIT`
+        : `${subject} would be overdrawn: its balance reaches ` +
           `${shortfall.amountMinor.toString()} ${shortfall.currency}` +
           `${occurredAt === null ? '' : ` at ${occurredAt.toISOString()}`}`,
       options,
