@@ -1,3 +1,4 @@
+import { newId } from '@ledger/shared';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -236,12 +237,43 @@ describe('lockAccounts called directly, bypassing the JS sort', () => {
       lockBothReversed(book.bank, book.cash),
     ]);
 
-    const codes = settled.flatMap((result) =>
-      result.status === 'rejected' ? [(result.reason as { code?: string }).code] : [],
-    );
-
-    // 40P01 is deadlock_detected. Nothing here should produce one.
-    expect(codes).not.toContain('40P01');
+    // 40P01 is deadlock_detected. Nothing here should produce one. Through `sqlStatesOf`,
+    // same as the other two assertions in this file - reading `.code` off the rejection
+    // directly yields `undefined` for a drizzle-wrapped error and would pass this exact
+    // check while a deadlock was happening.
+    expect(sqlStatesOf(settled)).not.toContain('40P01');
     expect(settled.every((result) => result.status === 'fulfilled')).toBe(true);
+  });
+});
+
+/**
+ * `sqlStatesOf` is what makes the three deadlock assertions above mean anything - a helper
+ * that silently returned `[]` for every rejection would let `not.toContain('40P01')` pass
+ * whether or not a deadlock occurred. This checks it against a real rejection from this same
+ * driver stack, not against a hand-built error shape, so a change to how drizzle wraps
+ * node-postgres errors would be caught here rather than by every deadlock test going blind
+ * at once.
+ */
+describe('sqlStatesOf', () => {
+  it('recovers a real SQLSTATE from a drizzle-wrapped driver error', async () => {
+    const client = await pool.connect();
+
+    try {
+      const db = drizzle(client, { schema });
+      const id = newId();
+      const duplicate = { id, name: 'sqlStatesOf fixture', baseCurrency: 'EUR' };
+
+      // A duplicate primary key, inserted twice through a drizzle handle rather than a raw
+      // `pg` client, so the rejection is genuinely wrapped the way `hasSqlState`'s own
+      // comment describes - drizzle's own error, with node-postgres' `23505` as its `cause`
+      // - and not a shape this test constructed by hand.
+      await db.insert(schema.books).values(duplicate);
+      const settled = await Promise.allSettled([db.insert(schema.books).values(duplicate)]);
+
+      expect(settled[0]?.status).toBe('rejected');
+      expect(sqlStatesOf(settled)).toContain(SQLSTATE.UNIQUE_VIOLATION);
+    } finally {
+      client.release();
+    }
   });
 });
