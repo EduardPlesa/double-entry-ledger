@@ -133,11 +133,19 @@ describe('LG004, deferred to COMMIT', () => {
  * Every migration run in this suite exercises the passing half of that already: the block runs
  * against a clean database on the way to every test in the project. What it cannot show is
  * that the block would *catch* anything, and a validation that silently passes on everything
- * is indistinguishable from no validation at all. So this reaches for the one role that can
- * manufacture the situation - `ledger_owner` owns `postings` and can therefore disable the
- * trigger that would otherwise make a negative account unrepresentable - and then runs the
- * migration's own text, extracted from the file rather than retyped, so that this cannot drift
- * away from what actually ships.
+ * is indistinguishable from no validation at all. So this manufactures the situation directly -
+ * inserting a negative-leg posting is an ordinary `INSERT`, unremarkable to the trigger that
+ * would otherwise reject it because that trigger is `DEFERRABLE INITIALLY DEFERRED` and this
+ * transaction never commits, so the queued check never runs - and then runs the migration's own
+ * text, extracted from the file rather than retyped, so that this cannot drift away from what
+ * actually ships.
+ *
+ * `ownerPool` is what the migration itself runs as, not a workaround: `ledger_owner` is exempt
+ * from the row-level security policies migration 0006 puts on `accounts`, `entries` and
+ * `postings`, because a table's owner bypasses its own policies unless `FORCE ROW LEVEL
+ * SECURITY` is set, and it is not. That is what lets the `DO` block's unscoped scan see every
+ * book rather than only the one `app.current_book_id` happens to name - which is exactly the
+ * privilege a real migration run has and a run through `ledger_app` would not.
  *
  * The whole thing is rolled back. Nothing else in the suite ever sees the account.
  */
@@ -179,10 +187,6 @@ describe("migration 0007's validation of the rows that were already there", () =
       await client.query('BEGIN');
       try {
         const book = await seedBook(client);
-
-        // Without this the insert below is simply impossible, which is the point of the
-        // trigger - and exactly why the pre-existing rows it never saw need their own check.
-        await client.query('ALTER TABLE postings DISABLE TRIGGER postings_account_not_overdrawn');
 
         await insertEntry(
           client,
