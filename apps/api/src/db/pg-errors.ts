@@ -20,6 +20,10 @@ export const SQLSTATE = {
   ENTRY_WITHOUT_POSTINGS: 'LG003',
   /** Ledger: a guarded account would be left negative. Raised at COMMIT. */
   ACCOUNT_OVERDRAWN: 'LG004',
+  /** Postgres: could not serialize access. The retryable one. */
+  SERIALIZATION_FAILURE: '40001',
+  /** Postgres: deadlock detected. Deliberately NOT retried - see lockAccounts. */
+  DEADLOCK_DETECTED: '40P01',
 } as const;
 
 /** The subset of node-postgres' error we actually read. */

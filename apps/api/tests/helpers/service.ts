@@ -1,6 +1,11 @@
 import { newId, testClock, type TestClock } from '@ledger/shared';
 import type { Pool } from 'pg';
-import { DrizzleUnitOfWork, createDatabase, type UnitOfWork } from '../../src/db/client.js';
+import {
+  DrizzleUnitOfWork,
+  createDatabase,
+  type ConcurrencyStrategy,
+  type UnitOfWork,
+} from '../../src/db/client.js';
 import { DrizzleLedgerRepository } from '../../src/repositories/ledger.repository.js';
 import { LedgerService } from '../../src/services/ledger.service.js';
 
@@ -12,6 +17,11 @@ export interface ServiceHarness {
   readonly clock: TestClock;
 }
 
+export interface ServiceOptions {
+  readonly strategy?: ConcurrencyStrategy;
+  readonly onRetry?: (attempt: number, error: unknown) => void;
+}
+
 /**
  * The real service, wired to a real database, with only the clock replaced.
  *
@@ -19,12 +29,15 @@ export interface ServiceHarness {
  * in an order this file also decides, which proves nothing about deferred triggers,
  * composite foreign keys or what happens when two transactions race for one `external_id`.
  */
-export function createService(pool: Pool): ServiceHarness {
+export function createService(pool: Pool, options: ServiceOptions = {}): ServiceHarness {
   const clock = testClock(START);
 
   const service = new LedgerService({
     repository: new DrizzleLedgerRepository(),
-    unitOfWork: new DrizzleUnitOfWork(createDatabase(pool)),
+    unitOfWork: new DrizzleUnitOfWork(createDatabase(pool), {
+      strategy: options.strategy ?? 'row-lock',
+      ...(options.onRetry !== undefined ? { onRetry: options.onRetry } : {}),
+    }),
     clock,
     newId,
   });
@@ -49,6 +62,7 @@ export function createService(pool: Pool): ServiceHarness {
  */
 export function createServiceWithFailingTransaction(failure: unknown): LedgerService {
   const unitOfWork: UnitOfWork = {
+    strategy: 'row-lock' as const,
     transaction: () => Promise.reject(failure),
     transactionInBook: () => Promise.reject(failure),
     get executor(): never {
@@ -70,6 +84,7 @@ export function createServiceWithoutDatabase(): LedgerService {
   };
 
   const unitOfWork: UnitOfWork = {
+    strategy: 'row-lock' as const,
     transaction: refuse,
     transactionInBook: refuse,
     get executor() {

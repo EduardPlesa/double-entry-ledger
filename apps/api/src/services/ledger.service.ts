@@ -248,8 +248,11 @@ export class LedgerService {
    *      a transaction and never reaches the database, so the common authoring mistake costs
    *      no round trip and produces an error that names the currency and the amount rather
    *      than a SQLSTATE.
-   *   2. The idempotency read, outside a transaction, because a replay is a plain SELECT.
-   *   3. Account checks and both inserts inside one transaction, which is what lets the
+   *   2. The idempotency read, inside the transaction. It began outside one - a replay is a
+   *      plain SELECT - and moved in when row-level security arrived, because `entries` is
+   *      behind a policy keyed on a setting that only exists within a transaction that
+   *      established it. See the note at the read itself.
+   *   3. Account checks and both inserts inside that same transaction, which is what lets the
    *      deferred constraint trigger see the whole entry at COMMIT.
    *
    * Step 1 does not replace the database's check; it front-runs it. The trigger is what
@@ -311,6 +314,10 @@ export class LedgerService {
       // entry is the answer - the whole promise of idempotency is that the loser gets it
       // too, rather than a 409 for an operation that did in fact happen.
       //
+      // This recovery is specific to this method and deliberately not part of the shared
+      // translator below: `reverseEntry` never inherits an external_id, so the race it would
+      // be recovering from cannot arise there.
+      //
       // A second transaction, because the one that raised is aborted and cannot be read
       // from. It is book-scoped like the first: the policy does not care that this read is
       // recovering from an error.
@@ -321,21 +328,7 @@ export class LedgerService {
         if (existing !== null) return { entry: existing, created: false };
       }
 
-      // The application check above should have caught this. If the database raises it
-      // anyway, the application check has a hole, and the entry is still rejected.
-      if (hasSqlState(error, SQLSTATE.ENTRY_UNBALANCED)) {
-        throw new UnbalancedEntryError([], { cause: error });
-      }
-
-      // The application check above should have caught this too. When the database raises it
-      // anyway, two writers raced and one of them lost at COMMIT - which is the failure mode
-      // this stage exists to characterise, and which the row locks below remove. Either way
-      // the entry is rejected, and the caller gets the same error class as the fast path.
-      if (hasSqlState(error, SQLSTATE.ACCOUNT_OVERDRAWN)) {
-        throw new AccountOverdrawnError('', null, null, { cause: error });
-      }
-
-      throw error;
+      throw translateWriteFailure(error);
     }
   }
 
@@ -350,6 +343,12 @@ export class LedgerService {
    *
    * A reversal is itself an ordinary entry, so reversing one is permitted. What is not is
    * reversing the same entry twice, which would double the correction.
+   *
+   * The same SQLSTATE translation as `postEntry`, and for a reason worth stating: a reversal
+   * writes the same rows through the same constraints, so it can trip LG001 and LG004 in
+   * exactly the same circumstances. Without this, one database condition reached the caller as
+   * a 422 through one route and a 500 through the other, which is a difference in the response
+   * with no difference behind it.
    */
   async reverseEntry(
     bookId: string,
@@ -360,6 +359,28 @@ export class LedgerService {
     const parsed = parseInput(reverseEntryInputSchema, input, 'reversal');
     const recordedAt = this.clock.now();
 
+    try {
+      return await this.reverseEntryInTransaction(bookId, entryId, parsed, recordedAt, author);
+    } catch (error) {
+      throw translateWriteFailure(error);
+    }
+  }
+
+  /**
+   * The body of `reverseEntry`, split out so the translation above wraps a single expression.
+   *
+   * Inlining it would mean a `try` around the whole method and a `catch` a screen and a half
+   * away from it, which is the arrangement that let the translation go missing from this path
+   * in the first place. Nothing here is reusable and nothing else calls it; the split is for
+   * the reader.
+   */
+  private async reverseEntryInTransaction(
+    bookId: string,
+    entryId: string,
+    parsed: z.output<typeof reverseEntryInputSchema>,
+    recordedAt: Date,
+    author: Authorship,
+  ): Promise<EntryRecord> {
     return this.unitOfWork.transactionInBook(bookId, async (tx) => {
       const original = await this.repository.findEntryById(tx, entryId);
 
@@ -589,15 +610,30 @@ export class LedgerService {
    * the entry's fate outside any mutual exclusion, which is the whole bug. Only the accounts
    * carrying a negative leg are locked, and that is sufficient - two transactions can only
    * jointly overdraw an account if both take money out of it, and both of those arrive here.
-   * A concurrent *positive* posting is unlocked and unseen, which is conservative rather than
-   * wrong: adding a positive posting at time T raises the prefixes at or after T and lowers
-   * none.
+   *
+   * A concurrent *positive* posting is therefore not blocked by this lock, and that is a
+   * deliberate property rather than a gap. Adding a positive posting at time T raises the
+   * prefixes at or after T and lowers none, so a depositor can never turn a decision made here
+   * into the wrong one. It is also why `lockAccounts` asks for `FOR NO KEY UPDATE` rather than
+   * `FOR UPDATE`: the depositor's own insert takes `FOR KEY SHARE` on the account row for the
+   * foreign key check, `FOR UPDATE` would conflict with that, and a pair of mirrored transfers
+   * would then deadlock on locks neither transaction knew it was taking. Under the weaker mode
+   * the claim is true in the way it reads - the deposit genuinely does pass - while two
+   * withdrawals from one account still serialise against each other.
+   *
+   * This method's own contract is unchanged either way: the accounts it names must be locked
+   * in a consistent order, which is what `guardedAccountsAtRisk` sorting them provides.
    */
   private async lockAccountsAtRisk(
     tx: Executor,
     legs: readonly PostedLeg[],
     known: ReadonlyMap<string, AccountRecord>,
   ): Promise<void> {
+    // Under SERIALIZABLE the database is already tracking the conflict, and an explicit lock
+    // would serialise writers that SSI would have let through - paying for both mechanisms
+    // and getting the worse half of each.
+    if (this.unitOfWork.strategy === 'serializable') return;
+
     await this.repository.lockAccounts(tx, guardedAccountsAtRisk(legs, known));
   }
 
@@ -641,6 +677,15 @@ export class LedgerService {
    * The accounts an entry's legs refer to, as records. `postEntry` already has them from
    * `assertPostable`; `reverseEntry` does not, because its legs come from the original entry
    * rather than from user input that had to be validated.
+   *
+   * A short read is an error rather than a smaller map, and the asymmetry is the reason. Every
+   * downstream use of this map - `guardedAccountsAtRisk`, and through it both the lock and the
+   * overdraft check - treats an id it cannot find as an account that needs neither, so a
+   * missing row does not fail loudly; it silently means "no lock, no check" for exactly the
+   * account whose absence nobody noticed. Nothing should be able to produce that here, since
+   * the composite foreign key on `postings` guarantees a parent row in the same book and this
+   * runs under the same book's policy. Which is precisely why, if it ever happens, the right
+   * answer is to stop rather than to write an entry under a rule that quietly did not apply.
    */
   private async accountsOfLegs(
     tx: Executor,
@@ -648,8 +693,45 @@ export class LedgerService {
   ): Promise<Map<string, AccountRecord>> {
     const ids = [...new Set(legs.map((leg) => leg.accountId))];
     const found = await this.repository.findAccountsByIds(tx, ids);
-    return new Map(found.map((account) => [account.id, account]));
+    const byId = new Map(found.map((account) => [account.id, account]));
+
+    const missing = ids.filter((id) => !byId.has(id));
+    if (missing.length > 0) throw new AccountNotFoundError(missing);
+
+    return byId;
   }
+}
+
+/**
+ * The database's answers to the two rules the application also checks, as domain errors.
+ *
+ * Shared by both write paths deliberately. `postEntry` and `reverseEntry` insert the same rows
+ * through the same constraints, so the same SQLSTATEs are reachable from each; when only one of
+ * them translated, an identical database condition was a 422 through one path and a 500 through
+ * the other. There is nothing about a reversal that makes it a different kind of failure.
+ *
+ * Both branches are the application check having a hole. That is not a reason to leave them
+ * out - it is the reason they exist. If the check is ever wrong, or two writers race in a way
+ * the locks do not cover, the entry is still rejected and the caller still gets the error class
+ * the fast path would have given them, rather than an unrecognised failure and a 500.
+ *
+ * Anything else is returned unchanged, for the caller to rethrow.
+ */
+function translateWriteFailure(error: unknown): unknown {
+  if (hasSqlState(error, SQLSTATE.ENTRY_UNBALANCED)) {
+    return new UnbalancedEntryError([], { cause: error });
+  }
+
+  // Null everywhere the detail would be, because the trigger knows which account went short
+  // and by how much, and this process does not - the SQLSTATE is all that crosses back. The
+  // alternative of inventing an empty string for the account id was worse than admitting the
+  // gap: it put `accountId: ""` in the response, which reads as an answer rather than as its
+  // absence.
+  if (hasSqlState(error, SQLSTATE.ACCOUNT_OVERDRAWN)) {
+    return new AccountOverdrawnError(null, null, null, { cause: error });
+  }
+
+  return error;
 }
 
 /**

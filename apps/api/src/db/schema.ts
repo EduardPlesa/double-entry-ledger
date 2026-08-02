@@ -195,10 +195,20 @@ export const postings = pgTable(
       foreignColumns: [accounts.id, accounts.bookId, accounts.currency],
     }),
 
-    // Deliberately no index on (account_id, id) or on entry_id yet. Those are read-path
-    // indexes, and stage 7 adds them with EXPLAIN ANALYZE either side to show what they
-    // buy. Indexing a foreign key column is usually about making parent deletes cheap,
-    // and in this schema nothing is ever deleted.
+    // Deliberately no index on (account_id, id) or on entry_id yet. Stage 7 adds them with
+    // EXPLAIN ANALYZE either side to show what they buy. Indexing a foreign key column is
+    // usually about making parent deletes cheap, and in this schema nothing is ever deleted.
+    //
+    // These were described here as read-path indexes, and stage 4 made that false of the
+    // first one. The overdraft rule reads every prefix of an account's history, so
+    // `lowestPrefixBalance` scans this table with no index to scan it by - a sequential scan
+    // of *all* postings, not of the account's - and it runs inside the critical section, with
+    // the account's row lock held. Then the deferred LG004 trigger runs the same scan again at
+    // COMMIT, once per inserted guarded posting, still inside that window. `postings(account_id)`
+    // is now a write-path index on the hottest lock in the system, and its absence is a known
+    // cost being carried on purpose rather than an oversight: it stays stage 7's work, where
+    // it is measured, alongside the balance-checkpoint question it belongs with. See
+    // docs/adr/0004-concurrency-control.md.
   ],
 );
 

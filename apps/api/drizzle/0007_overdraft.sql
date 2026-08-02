@@ -93,6 +93,60 @@ BEGIN
 END
 $$;--> statement-breakpoint
 
+-- ---------------------------------------------------------------------------------------
+-- Establish the invariant before binding it.
+--
+-- CREATE CONSTRAINT TRIGGER binds future inserts and says nothing whatever about the rows
+-- already here. That gap is not cosmetic, because the service optimises against exactly the
+-- assumption this block checks. `guardedAccountsAtRisk` only examines - and only locks -
+-- accounts an entry takes money *out* of, on the reasoning that a positive posting raises
+-- every prefix at or after it and lowers none. Sound, but only if no prefix is already
+-- negative. On an account that starts out short, a pure deposit skips the service check
+-- altogether, then trips the trigger below at COMMIT, and the caller gets a 422 whose account
+-- id is unknown and whose shortfall is null - a rejection nobody can act on, for a deposit
+-- that was trying to fix the very problem being complained about.
+--
+-- So the migration establishes the assumption instead of hoping for it. Applying this file to
+-- a database that already violates the rule fails here, loudly, naming the account and the
+-- amount, rather than succeeding and leaving a latent violation for a deposit to discover.
+--
+-- Ordered by (occurred_at, id), the same predicate as the trigger and as
+-- `lowestPrefixBalance`. There is deliberately no WHEN clause on the trigger itself narrowing
+-- it to negative postings to match the service's optimisation: the trigger's whole value is
+-- being an independent check, and a check that reproduces the assumption it is meant to
+-- verify checks nothing. It stays broad, and this block is what makes the service's narrower
+-- version safe.
+DO $$
+DECLARE
+	offender record;
+BEGIN
+	SELECT prefixes.account_id, min(prefixes.running) AS lowest
+		INTO offender
+	FROM (
+		SELECT
+			p.account_id,
+			sum(p.amount_minor) OVER (
+				PARTITION BY p.account_id
+				ORDER BY e.occurred_at, p.id
+				ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+			) AS running
+		FROM public.postings p
+		JOIN public.entries e ON e.id = p.entry_id
+		JOIN public.accounts a ON a.id = p.account_id
+		WHERE a.type = ANY (public.guarded_account_types())
+	) prefixes
+	GROUP BY prefixes.account_id
+	HAVING min(prefixes.running) < 0
+	LIMIT 1;
+
+	IF FOUND THEN
+		RAISE EXCEPTION 'account % already violates the overdraft rule: its balance reaches % at some point in its history', offender.account_id, offender.lowest
+			USING ERRCODE = 'LG004',
+			      HINT = 'Correct the account with a compensating entry before applying this migration.';
+	END IF;
+END
+$$;--> statement-breakpoint
+
 CREATE CONSTRAINT TRIGGER postings_account_not_overdrawn
 	AFTER INSERT ON postings
 	DEFERRABLE INITIALLY DEFERRED
