@@ -120,8 +120,12 @@ overdraft rule is kept true when two writers meet — `row-lock` (the default, a
 takes `SELECT ... FOR NO KEY UPDATE` on the accounts an entry draws from, so writers block;
 `serializable` drops the explicit locks, runs the transaction at `SERIALIZABLE` and retries
 on `40001`, so writers abort and try again. Both enforce the rule exactly and admit the same
-number of concurrent withdrawals; they differ in what the losers are told, which is the whole
-argument of `docs/adr/0004-concurrency-control.md`.
+number of concurrent withdrawals; they differ in what the losers are told, and that difference
+is not merely cosmetic. Nothing translates an exhausted `40001` into a domain error, so under
+`serializable` a contested withdrawal that `row-lock` answers with a 422 `ACCOUNT_OVERDRAWN`
+instead exhausts `DrizzleUnitOfWork`'s retries and reaches the client as a 500. That is why
+`row-lock` ships as the default rather than `serializable`; the full argument, including the
+measurement that found it, is `docs/adr/0004-concurrency-control.md`.
 
 ## Two connections, two roles
 
