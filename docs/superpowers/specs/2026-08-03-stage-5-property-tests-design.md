@@ -18,6 +18,8 @@ regression rather than on a case: a query-count assertion, so an N+1 on the read
   generated batches fired through genuinely parallel connections.
 - A query-count helper and assertions that fail when a read path's round trips grow with the
   size of its result.
+- Pure properties over the code amounts pass through — `Money` and the pagination cursor —
+  running in the unit project with no container.
 - A regression corpus mechanism, populated by whatever the properties actually find.
 
 ## Non-goals
@@ -28,7 +30,9 @@ regression rather than on a case: a query-count assertion, so an N+1 on the read
 - `EXPLAIN ANALYZE`, indexes, balance checkpoints. Stage 7. The query-count assertion here is
   deliberately about the number of round trips, which is a property of the code; plan quality is
   a property of the data and belongs with the seeded half-million postings.
-- Predicting which entries the service will refuse. See "The model follows" below — this is the
+- Predicting which entries the service will refuse. Invariant 6 asserts that one class of entry
+  is never refused, which is a consequence of the rule and costs no prefix scan; predicting the
+  rest means reimplementing the rule a third time. See "The model follows" below — this is the
   central design decision of the stage, not an omission.
 - Frontend. Stage 6.
 
@@ -37,6 +41,8 @@ regression rather than on a case: a query-count assertion, so an N+1 on the read
 | Decision | Choice | Why |
 | --- | --- | --- |
 | What the properties drive | `LedgerService` against the Testcontainers database | The invariants this project is about are enforced half in TypeScript and half in migrations `0003` and `0007`. A property run against an in-memory reimplementation proves the reimplementation correct and says nothing about the triggers, the deferred constraint, or the prefix rule's window function. The cost is real — a case is a book seed plus a few dozen round trips — and is paid by keeping `numRuns` small and the properties dense. |
+| Where the container is *not* needed | `Money` and the cursor, in the unit project | Those two are total functions over values, so a property about them needs nothing but Node and can run thousands of cases in the time one database case takes. Making them share the ledger harness would buy nothing and cost three orders of magnitude in coverage. |
+| Whether anything is asserted at the HTTP boundary | One property, narrow, on the amount round trip | The route layer's own behaviour is covered by stage 3's example tests. What no test covers is that an arbitrary amount survives the round trip through decimal string, `bigint`, `numeric`, and back — which is the one path in the system where a JS `number` could appear without any layer noticing. One property, not a second command harness. |
 | How sequences are expressed | `fc.commands` with an in-memory model advanced alongside | Reversal is inherently stateful: it needs an entry that exists and has not already been reversed. A flat array of entries either cannot express that or expresses it with indices that shrinking mangles. Commands also shrink to a *minimal sequence*, which is the artifact the stage brief asks to promote into a regression test. |
 | What the model does on a rejection | Records nothing, and never predicts | Discussed at length below. |
 | The concurrent property | fast-check generates the batch shape; the harness fires it over real pool connections | `fc.scheduler` shrinks interleavings of JS `await` points. The thing stage 4 proved dangerous was Postgres commit ordering under READ COMMITTED, which no JS scheduler observes or controls. Generating the shape and firing for real keeps the subject intact and gives up deterministic replay, which the shape's own shrinking partly recovers. |
@@ -84,22 +90,35 @@ interface ModelPosting {
 No balance is stored on the model as a mutable number. Balances are summed from `postings` when
 asked, which is invariant 4 of this project applied to the test double as well as to the system.
 
-### The known hole
+### The known hole, and the half of it that closes cheaply
 
-A service that refused every entry would satisfy every invariant below. Vacuous truth is the
-standing failure mode of property-based testing, and this design has it by construction: that is
-the price of not predicting rejections.
+A service that refused every entry would satisfy every state invariant below. Vacuous truth is
+the standing failure mode of property-based testing, and this design has it by construction: that
+is the price of not predicting rejections.
 
-The guard is coverage accounting, not a second copy of the rule. The harness tallies accepted
-against rejected `PostEntry` commands across the whole `fc.assert` run and asserts afterwards
-that both counts are non-zero and acceptances are the clear majority, reporting the distribution
-either way. It catches the degenerate service and it catches a generator that has drifted into
-producing entries nothing will accept — which is the same failure wearing different clothes, and
-the more likely of the two.
+Half of it closes for one line, without a second copy of the rule. Stage 4's design established
+that an entry carrying **no negative leg on any guarded account** cannot lower any prefix: every
+leg of an entry shares one `occurred_at`, new postings take ids above every existing row, so
+prefixes before the entry's position are untouched and every prefix at or after it rises
+monotonically. Such an entry is therefore *provably* acceptable, and invariant 6 below says so.
+That is a consequence of the rule rather than a restatement of it — it needs no prefix scan, no
+window function and no knowledge of the account's history.
+
+What remains uncovered is the other direction: an entry that *does* carry a negative guarded leg
+and is refused when it should not have been. Predicting those is exactly the prefix scan, and
+that is the copy this design declines to make.
+
+The residue is handled by coverage accounting rather than by assertion. The harness tallies
+accepted against rejected `PostEntry` commands across the whole `fc.assert` run and asserts
+afterwards that both counts are non-zero and acceptances are the clear majority, reporting the
+distribution either way. It catches a service that has become over-refusing in aggregate, and it
+catches a generator that has drifted into producing entries nothing will accept — which is the
+same failure wearing different clothes, and the more likely of the two.
 
 ## The invariants
 
-Checked after **every** command, not only after reads.
+The first five are checked after **every** command, not only after reads. The sixth is checked
+inside `PostEntry`, since it is a claim about a call's outcome rather than about a state.
 
 1. **Book-wide zero sum, per currency.** One grouped query against the database; the model
    agrees. This is invariant 1 of the project, asserted over sequences rather than over a case.
@@ -131,12 +150,22 @@ Checked after **every** command, not only after reads.
    balance." That is the special case where nothing landed in between. The delta form is stronger
    and stays checkable in the middle of a generated sequence, which is where it will actually run.
 
+6. **An entry with no negative leg on a guarded account is never refused.** The one liveness
+   claim in the set, and the only invariant here about a decision rather than a state. Justified
+   by the monotonicity argument above; asserted by checking the generated legs before the call
+   and failing on an `AccountOverdrawnError` that the shape of the entry rules out.
+
+   This is also the assertion that would catch the `lockAccountsAtRisk` filter widening — if the
+   service ever starts checking accounts carrying only positive legs, the extra check is not
+   wrong on its own, but the day it starts refusing on one, this fails and nothing else would.
+
 ## Commands
 
 Five, each with a `check` precondition so only valid ones fire. `maxCommands: 12`.
 
 **`PostEntry`** — generated balanced legs, through `service.postEntry`. On
-`AccountOverdrawnError`, record nothing. On any other error, fail. The generator emits only
+`AccountOverdrawnError`, record nothing — unless the legs carry no negative guarded leg, in which
+case invariant 6 has been broken and the command fails. On any other error, fail. The generator emits only
 well-formed entries naming real accounts with matching currencies, so an `ENTRY_UNBALANCED`, a
 currency mismatch or an unmapped 500 from this path is a genuine find and must not be swallowed
 as "the rule refused it."
@@ -177,6 +206,53 @@ multi-currency costs the model nothing.
 Small deliberately: backdating then happens constantly and ties are common, which is what
 invariants 4 and 5 need in order to be interesting rather than incidental. A fixed clock makes a
 run deterministic apart from generated ids.
+
+## Pure properties, no container
+
+Two modules are total functions over values and deserve properties at a scale the database
+harness can never reach. `numRuns` stays at fast-check's default here — these are milliseconds.
+
+**`packages/shared/src/money.property.test.ts`**, beside the existing `money.test.ts`. Needs
+`fast-check` as a devDependency of `@ledger/shared` too; the package has its own vitest run.
+
+- `parse(format(n)) === n` for arbitrary `bigint`, including values well beyond
+  `Number.MAX_SAFE_INTEGER` — the existing unit test pins a handful of those by hand, and this is
+  the same claim over the whole range.
+- `format` output always re-parses, and always carries exactly the currency's minor-unit digits.
+- `add` is associative and commutative, and `add(n, -n)` is zero.
+- Negative values round-trip. Sign handling around the decimal point is where a formatter written
+  from the positive case breaks, and `-0.05` is not a case anyone writes by hand.
+
+**`apps/api/tests/unit/cursor.property.test.ts`**, in the unit project.
+
+- `decodePostingCursor(encodePostingCursor(id)) === id` for arbitrary non-negative `bigint`.
+- An arbitrary string that is not a well-formed cursor throws `InvalidCursorError` and never
+  anything else. `decodePostingCursor` currently reaches `BigInt(match[1])` only behind a regex,
+  and the property is what keeps that true if the regex is ever loosened.
+
+These are pure additions. They test code that has been correct since stage 2 and are expected to
+stay green; the reason to write them is that every amount in the system passes through `Money`,
+so a defect there is a defect everywhere at once, and the database properties would report it as
+a confusing disagreement three layers away from its cause.
+
+## The boundary property
+
+`tests/properties/http.property.test.ts`, in the `properties` project, using stage 3's
+`tests/helpers/app.ts`.
+
+One property, deliberately narrow: post an entry with generated amounts through
+`POST /books/:id/entries`, then read `GET /accounts/:id/balance` back, and assert the balance
+string equals the sum of the legs computed in `bigint`. Arbitrary magnitudes, including past
+`Number.MAX_SAFE_INTEGER`, and negative legs.
+
+The route layer's status codes, validation and problem documents are stage 3's tests and stay
+there. What this covers is the one thing no example test can cover by enumeration: an amount
+crossing decimal string → `bigint` → `numeric` → `bigint` → decimal string without a `number`
+appearing anywhere in the chain. The unit properties above assert the two ends of that chain in
+isolation; this asserts the chain.
+
+`numRuns` here is low — 15 — since each case is a full HTTP round trip through a real app and a
+real transaction.
 
 ## The concurrent property
 
@@ -248,9 +324,12 @@ apps/api/tests/properties/model.ts
 apps/api/tests/properties/commands.ts
 apps/api/tests/properties/ledger.property.test.ts
 apps/api/tests/properties/regressions.ts
+apps/api/tests/properties/http.property.test.ts
+apps/api/tests/unit/cursor.property.test.ts
 apps/api/tests/helpers/query-count.ts
 apps/api/tests/services/query-count.test.ts
 apps/api/tests/concurrency/conservation.property.test.ts
+packages/shared/src/money.property.test.ts
 ```
 
 Modified:
@@ -259,5 +338,6 @@ Modified:
 apps/api/package.json                    fast-check ^4.9.0
 apps/api/vitest.config.ts                the properties project
 apps/api/tests/helpers/concurrency.ts    fireConcurrently over arbitrary specs
+packages/shared/package.json             fast-check ^4.9.0
 README.md                                the property-testing story, the corpus
 ```
