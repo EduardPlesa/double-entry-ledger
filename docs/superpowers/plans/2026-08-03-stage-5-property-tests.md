@@ -636,7 +636,23 @@ Produces a first, deliberately simple property so the scaffolding is exercised b
   export function hasNegativeGuardedLeg(spec: EntrySpec, model: LedgerModel): boolean
 
   // fixture.ts
-  export interface PropertyBook { bookId: string; accounts: readonly AccountRecord[]; service: LedgerService }
+  export interface PropertyBook {
+    bookId: string;
+    accounts: readonly AccountRecord[];
+    service: LedgerService;
+    /**
+     * A model already holding the opening entries this fixture posted.
+     *
+     * `new LedgerModel(accounts)` would start empty against a database that is not, and every
+     * balance assertion would then be off by exactly the opening balance. The fixture posted
+     * those entries, so the fixture is what knows about them — and it seeds them from the real
+     * `EntryRecord`s it got back, so their ids are the ids the database holds and a later
+     * reversal of an opening entry works.
+     *
+     * A factory rather than a single instance because each generated case needs its own.
+     */
+    newModel(): LedgerModel;
+  }
   export function createPropertyBook(pool: Pool): Promise<PropertyBook>
   ```
 
@@ -1460,7 +1476,10 @@ describe('arbitrary sequences of valid entries', () => {
 
         const commands = gen(ledgerCommands, book.accounts, tally);
 
-        await fc.asyncModelRun(() => ({ model: new LedgerModel(book.accounts), real }), commands);
+        // `book.newModel()`, never `new LedgerModel(book.accounts)`: the fixture already posted
+        // the opening entries, so a model that started empty would be off by exactly the opening
+        // balance on every guarded account.
+        await fc.asyncModelRun(() => ({ model: book.newModel(), real }), commands);
       }),
       { numRuns: propertyRuns() },
     );
@@ -1593,6 +1612,7 @@ export interface PropertyBook {
   readonly accounts: readonly AccountRecord[];
   readonly service: LedgerService;
   readonly unitOfWork: UnitOfWork;
+  newModel(): LedgerModel;
 }
 ```
 
