@@ -73,6 +73,19 @@ export default tseslint.config(
   },
 
   {
+    // `tests/properties/runs.ts` reads `LEDGER_PROPERTY_RUNS`, so CI can raise how many cases a
+    // property runs without a third place that knows how to read configuration. Scoped to the
+    // whole test tree, same as the `no-console` exemption below, rather than to that one file -
+    // this rule cannot single out a file kept honest by convention any more precisely than that.
+    // `runs.ts`'s own doc comment is what says it is the only file in the tree meant to use this.
+    files: ['apps/api/tests/**'],
+    rules: {
+      'no-restricted-properties': 'off',
+      'no-restricted-syntax': 'off',
+    },
+  },
+
+  {
     // Migrations, container setup and the migration CLI all print progress; that is their
     // whole output. Tests may print diagnostics.
     files: ['**/*.test.ts', 'apps/api/tests/**', 'apps/api/src/db/migrate.ts'],
