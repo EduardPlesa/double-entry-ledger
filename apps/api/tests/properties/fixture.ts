@@ -19,7 +19,28 @@ import { LedgerModel } from './model.js';
  * design: entries and postings cannot be deleted. Isolation is disjointness.
  */
 
-export const OPENING_MINOR = 100_000n;
+/**
+ * Measured, not derived: at 100 000 a run of 1000 generated cases posted 3249 entries and
+ * refused none - a dozen legs each at most ±`MAX_LEG_MINOR` (20 000) is a random walk whose
+ * standard deviation lands around 30 000, so reaching -100 000 was a 3-4 sigma tail that
+ * essentially never happened, and the coverage guard on `tally.refused` never had anything to
+ * find.
+ *
+ * 30 000 was tried next and measured over ten full runs: 649 attempts total, only 42 refused
+ * (~6.5%, a mean of ~4.2 refusals per run). The guard's `tally.refused > 0` assertion held on
+ * all ten, but `P(0 refusals in one run) ≈ (1 − 0.065)^65 ≈ 1.3%` - ten samples has roughly an
+ * 87% chance of missing an event that rare, so ten green runs did not bound the risk of a
+ * spurious red one.
+ *
+ * 16 000 is what replaced it, chosen so the *mean* refusal count clears the Poisson zero-tail
+ * rather than merely being observed non-zero. Measured over ten full runs at this value: 668
+ * attempts total, 160 refused (508 accepted), a mean of 16.0 refusals per run and a minimum of
+ * 10 in any single run - `P(0) ≈ e^-16`, far below the ~0.005% target. Acceptances stayed the
+ * clear majority throughout (76% overall, and strictly greater than refusals in every one of
+ * the ten runs, by margins no tighter than roughly 2:1). See `task-5-report.md` for the full
+ * per-run counts.
+ */
+export const OPENING_MINOR = 16_000n;
 export const OPENING_AT = '2026-01-01T00:00:00.000Z';
 
 export interface PropertyBook {
