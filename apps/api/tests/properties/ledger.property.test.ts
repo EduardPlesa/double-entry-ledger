@@ -2,11 +2,8 @@ import fc from 'fast-check';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { AccountOverdrawnError } from '../../src/domain/errors.js';
-import { isGuardedAccountType } from '../../src/domain/overdraft.js';
-import type { AccountRecord } from '../../src/repositories/ledger.repository.js';
 import { entrySpec, toPostEntryInput } from './arbitraries.js';
-import { createPropertyBook, OPENING_AT, OPENING_MINOR } from './fixture.js';
-import { LedgerModel } from './model.js';
+import { createPropertyBook } from './fixture.js';
 import { propertyRuns } from './runs.js';
 
 /**
@@ -27,39 +24,6 @@ afterAll(async () => {
   await pool.end();
 });
 
-/**
- * Tells the model about the opening entries `createPropertyBook` already posted through the
- * real service, one per currency.
- *
- * The model follows - it records outcomes, it does not predict them - and this opening balance
- * is exactly that: a call that already succeeded, before the case's own generated entries exist
- * to be recorded. `createPropertyBook` does not hand back the entries it posted, so this mirrors
- * its currency/guarded/counterpart grouping instead of duplicating a network round trip to read
- * it back. Both read the same fixed account order out of `accounts`, so the two stay in sync by
- * construction rather than by convention.
- */
-function seedOpeningBalances(model: LedgerModel, accounts: readonly AccountRecord[]): void {
-  const occurredAt = new Date(OPENING_AT);
-  const currencies = [...new Set(accounts.map((account) => account.currency))].sort();
-
-  for (const currency of currencies) {
-    const inCurrency = accounts.filter((account) => account.currency === currency);
-    const guarded = inCurrency.filter((account) => isGuardedAccountType(account.type));
-    const counterpart = inCurrency.find((account) => !isGuardedAccountType(account.type));
-
-    if (guarded.length === 0 || counterpart === undefined) continue;
-
-    model.record({
-      id: `opening-${currency}`,
-      occurredAt,
-      legs: [
-        ...guarded.map((account) => ({ accountId: account.id, amountMinor: OPENING_MINOR })),
-        { accountId: counterpart.id, amountMinor: -OPENING_MINOR * BigInt(guarded.length) },
-      ],
-    });
-  }
-}
-
 describe('a sequence of accepted entries', () => {
   it('leaves the book summing to zero in every currency, and every balance equal to its postings', async () => {
     await fc.assert(
@@ -68,8 +32,7 @@ describe('a sequence of accepted entries', () => {
       // through `gen` still shrink.
       fc.asyncProperty(fc.gen(), async (gen) => {
         const book = await createPropertyBook(pool);
-        const model = new LedgerModel(book.accounts);
-        seedOpeningBalances(model, book.accounts);
+        const model = book.newModel();
 
         const count = gen(fc.integer, { min: 1, max: 6 });
         const specs = Array.from({ length: count }, () => gen(entrySpec, book.accounts));

@@ -1,10 +1,11 @@
 import { formatMoney, money } from '@ledger/shared';
 import type { Pool } from 'pg';
 import { isGuardedAccountType } from '../../src/domain/overdraft.js';
-import type { AccountRecord } from '../../src/repositories/ledger.repository.js';
+import type { AccountRecord, EntryRecord } from '../../src/repositories/ledger.repository.js';
 import type { LedgerService } from '../../src/services/ledger.service.js';
 import { seedBookIn, type Book } from '../helpers/ledger.js';
 import { createService } from '../helpers/service.js';
+import { LedgerModel } from './model.js';
 
 /**
  * A funded book, one per generated case.
@@ -25,12 +26,29 @@ export interface PropertyBook {
   readonly bookId: string;
   readonly accounts: readonly AccountRecord[];
   readonly service: LedgerService;
+  /**
+   * A fresh {@link LedgerModel}, pre-loaded with the opening entries this fixture already
+   * posted through the real service.
+   *
+   * A model that starts empty is wrong the moment it's compared against this database: the
+   * database holds one opening entry per currency and the model holds none, so every balance
+   * the model reports is off by exactly `OPENING_MINOR` per guarded account. This fixture is
+   * the only thing that knows those entries exist - it posted them - so it is what constructs
+   * a model that agrees with the database from the start, rather than leaving each caller to
+   * reconstruct that knowledge (and risk reconstructing it wrong).
+   *
+   * A factory rather than a shared instance: every generated case gets its own book and must
+   * get its own model, or state from one case would leak into the next through a model that
+   * outlives it.
+   */
+  newModel(): LedgerModel;
 }
 
 export async function createPropertyBook(pool: Pool): Promise<PropertyBook> {
   const { service } = createService(pool);
   const book = await seedBookIn(pool);
   const records = accountsOf(book);
+  const openingEntries: EntryRecord[] = [];
 
   // One opening entry per currency: every guarded account in it funded, the counterpart on an
   // unguarded account of the same currency so the entry balances without going short.
@@ -43,7 +61,7 @@ export async function createPropertyBook(pool: Pool): Promise<PropertyBook> {
 
     if (guarded.length === 0 || counterpart === undefined) continue;
 
-    await service.postEntry(book.bookId, {
+    const { entry } = await service.postEntry(book.bookId, {
       occurredAt: OPENING_AT,
       description: `opening balance ${currency}`,
       legs: [
@@ -59,9 +77,29 @@ export async function createPropertyBook(pool: Pool): Promise<PropertyBook> {
         },
       ],
     });
+
+    openingEntries.push(entry);
   }
 
-  return { bookId: book.bookId, accounts: records, service };
+  return {
+    bookId: book.bookId,
+    accounts: records,
+    service,
+    newModel(): LedgerModel {
+      const model = new LedgerModel(records);
+      for (const entry of openingEntries) {
+        model.record({
+          id: entry.id,
+          occurredAt: entry.occurredAt,
+          legs: entry.postings.map((posting) => ({
+            accountId: posting.accountId,
+            amountMinor: posting.amountMinor,
+          })),
+        });
+      }
+      return model;
+    },
+  };
 }
 
 /**
