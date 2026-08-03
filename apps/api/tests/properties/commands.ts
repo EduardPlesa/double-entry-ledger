@@ -1,10 +1,12 @@
 import fc from 'fast-check';
 import { expect } from 'vitest';
+import type { UnitOfWork } from '../../src/db/client.js';
 import { AccountOverdrawnError } from '../../src/domain/errors.js';
 import type { AccountRecord } from '../../src/repositories/ledger.repository.js';
 import type { LedgerService } from '../../src/services/ledger.service.js';
-import { entrySpec, toPostEntryInput, type EntrySpec } from './arbitraries.js';
+import { entrySpec, hasNegativeGuardedLeg, toPostEntryInput, type EntrySpec } from './arbitraries.js';
 import type { LedgerModel } from './model.js';
+import { assertGuardedPrefixes } from './prefix.js';
 
 /**
  * The commands a generated sequence is made of, and the invariants checked after each.
@@ -18,6 +20,8 @@ import type { LedgerModel } from './model.js';
 export interface Real {
   readonly bookId: string;
   readonly service: LedgerService;
+  /** For the repository-level cross-check in `prefix.ts`. Nothing writes through it. */
+  readonly unitOfWork: UnitOfWork;
 }
 
 /** Accept/refuse counts across a whole run. See `tally` in `ledger.property.test.ts`. */
@@ -85,6 +89,9 @@ export async function assertInvariants(model: LedgerModel, real: Real): Promise<
       expected.credits,
     );
   }
+
+  // 4. No guarded account's minimum running balance is below zero.
+  await assertGuardedPrefixes(model, { bookId: real.bookId, unitOfWork: real.unitOfWork });
 }
 
 class PostEntryCommand implements LedgerCommand {
@@ -117,6 +124,17 @@ class PostEntryCommand implements LedgerCommand {
       // else - a validation error, a currency mismatch, an unmapped 500 - is a finding, and
       // swallowing it as "the rule refused" is how a property test quietly stops testing.
       if (!(error instanceof AccountOverdrawnError)) throw error;
+
+      // 6. The one liveness claim in the set. An entry with no negative leg on a guarded
+      // account cannot lower any prefix - all its legs share one `occurred_at`, its postings
+      // take ids above every existing row - so refusing it is a defect, not a decision. This is
+      // a consequence of the rule rather than a restatement of it: no prefix scan, no window
+      // function, no knowledge of the account's history.
+      expect(
+        hasNegativeGuardedLeg(this.spec, model),
+        `refused an entry that cannot lower any guarded prefix: ${this.toString()}`,
+      ).toBe(true);
+
       this.tally.refused += 1;
     }
 

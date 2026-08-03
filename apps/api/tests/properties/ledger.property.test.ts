@@ -36,7 +36,11 @@ describe('arbitrary sequences of valid entries', () => {
     await fc.assert(
       fc.asyncProperty(fc.gen(), async (gen) => {
         const book = await createPropertyBook(pool);
-        const real: Real = { bookId: book.bookId, service: book.service };
+        const real: Real = {
+          bookId: book.bookId,
+          service: book.service,
+          unitOfWork: book.unitOfWork,
+        };
 
         const commands = gen(ledgerCommands, book.accounts, tally);
 
