@@ -1948,9 +1948,9 @@ describe('an amount across the HTTP boundary', () => {
     const owner = await registerUser(application);
     const book = await createBook(application, owner);
 
-    // Revenue, not asset: the overdraft rule guards assets, and this property is about
-    // arithmetic rather than about the rule. A guarded account would refuse the negative leg
-    // and the property would be measuring the wrong thing.
+    // The guarded account takes the positive leg and the unguarded one takes the negative, so
+    // the overdraft rule never fires. This property is about arithmetic, not about the rule:
+    // a refusal here would stop it measuring what it exists to measure.
     const debit = await createAccount(application, book, { name: 'Receivable', type: 'asset' });
     const credit = await createAccount(application, book, { name: 'Revenue', type: 'revenue' });
 
@@ -2118,7 +2118,7 @@ const OPENING = 50_000n;
 const STRATEGIES: readonly ConcurrencyStrategy[] = ['row-lock', 'serializable'];
 
 /** Low: each case is a fresh funded book plus up to eight overlapping transactions. */
-const RUNS = 8;
+const RUNS = 15;
 
 let pool: Pool;
 
@@ -2167,7 +2167,10 @@ describe.each(STRATEGIES)('a generated concurrent batch under %s', (strategy) =>
           // Value conserved: the book still sums to zero.
           expect(cash + rent + sales, 'the book stopped summing to zero').toBe(0n);
 
-          // The rule held.
+          // The rule held. The final balance is also the *minimum prefix* here, which is the
+          // form the rule actually takes: every transfer is negative on `cash` and they all
+          // share one `occurred_at`, so the running total only ever falls and its lowest point
+          // is where it ends. A batch with positive legs would need the prefix query instead.
           expect(cash, 'the guarded account went negative').toBeGreaterThanOrEqual(0n);
 
           // Every fulfilled call committed an entry, and every rejected one committed none.
