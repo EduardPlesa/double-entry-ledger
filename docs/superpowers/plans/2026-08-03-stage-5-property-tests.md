@@ -1500,9 +1500,13 @@ describe('arbitrary sequences of valid entries', () => {
 pnpm --filter @ledger/api exec vitest run --project properties
 ```
 
-Expected: FAIL — `Cannot find module './commands.js'` before step 1, and after it, possibly a coverage assertion if the generated amounts turn out to overdraw more often than expected.
+Expected: FAIL — `Cannot find module './commands.js'` before step 1, and after it, the coverage guard's `tally.refused` assertion.
 
-**If the coverage guard fails because refusals dominate**, lower `MAX_LEG_MINOR` in `arbitraries.ts` or raise `OPENING_MINOR` in `fixture.ts` until acceptances are the clear majority — and say in a comment which way you moved it and why. Do not relax the assertion.
+**Retune the fixture before you wire the guard.** Task 4 measured the shipped constants: across 1000 generated cases and 3249 posted entries, **zero** were refused. That is not bad luck, it is arithmetic. A guarded account takes at most one leg per entry, uniform in ±`MAX_LEG_MINOR` (20 000), against an opening cushion of `OPENING_MINOR` (100 000). Over a dozen entries the random walk's standard deviation is around 30 000 minor units, so reaching −100 000 is a 3–4σ tail — it essentially never happens, and the rule this stage exists to test never fires.
+
+Change `OPENING_MINOR` in `apps/api/tests/properties/fixture.ts` from `100_000n` to `30_000n`, leaving `MAX_LEG_MINOR` at `20_000n`. With twelve commands the walk's deviation is roughly 40 000 against a 30 000 cushion, so refusals become ordinary while acceptances stay the clear majority — which is exactly what the guard asserts. Update the constant's doc comment to state the measured reasoning rather than the old claim.
+
+Then **verify empirically rather than trusting this arithmetic**: run the property and report the accepted and refused counts. If refusals still do not appear, lower `OPENING_MINOR` further; if they dominate, raise it. Say in a comment which way you moved it and why. Do not relax the assertion, and do not widen it into a range.
 
 - [ ] **Step 4: Run it to verify it passes**
 
