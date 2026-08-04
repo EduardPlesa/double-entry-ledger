@@ -75,8 +75,8 @@ describe('arbitrary sequences of valid entries', () => {
     // asserted here: measured over ten runs at the default `numRuns` (25), reversalsAccepted
     // never fell below 14, but reversalsRefused was 0 in one of the ten. Asserting it greater
     // than zero would reintroduce exactly the flakiness this fix exists to remove, so the
-    // refusal branch is exercised (see the delta-restoring assertion inside
-    // `ReverseEntryCommand.run`) without being required to occur in every run.
+    // refusal branch (the `AccountOverdrawnError` catch in `ReverseEntryCommand.run`, which
+    // increments `reversalsRefused`) is exercised without being required to occur in every run.
     expect(tally.reversalsAccepted, 'no reversal was ever accepted').toBeGreaterThan(0);
   });
 });
