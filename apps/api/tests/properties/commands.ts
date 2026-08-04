@@ -47,27 +47,14 @@ export interface Tally {
 export type LedgerCommand = fc.AsyncCommand<LedgerModel, Real>;
 
 /**
- * Checked after every command, not only after reads.
+ * Invariant 3: the trial balance agrees with the model, account by account, and states that it
+ * balances.
  *
- * Invariant 2 - a balance equals the sum of that account's own postings - is the load-bearing
- * one: it ties the model to the database, and every other assertion made against the model is
- * an assertion about real data only because it holds.
+ * Factored out of {@link assertInvariants} so `ReadTrialBalanceCommand` can make exactly this
+ * assertion - the one thing a trial-balance read actually claims - without also re-running the
+ * rest of the sweep, which a read command changes nothing that could invalidate.
  */
-export async function assertInvariants(model: LedgerModel, real: Real): Promise<void> {
-  // 1. The book sums to zero in every currency.
-  for (const [currency, total] of model.totalsByCurrency()) {
-    expect(total, `the model's ${currency} total`).toBe(0n);
-  }
-
-  // 2. Every balance is the sum of that account's postings.
-  for (const account of model.accounts) {
-    const actual = await real.service.getBalance(real.bookId, account.id);
-    expect(actual.balance.amountMinor, `balance of ${account.name}`).toBe(
-      model.balanceOf(account.id),
-    );
-  }
-
-  // 3. The trial balance agrees, account by account, and states that it balances.
+export async function assertTrialBalance(model: LedgerModel, real: Real): Promise<void> {
   const report = await real.service.trialBalance(real.bookId);
   expect(report.balanced, 'the trial balance does not balance').toBe(true);
 
@@ -103,6 +90,37 @@ export async function assertInvariants(model: LedgerModel, real: Real): Promise<
       expected.credits,
     );
   }
+}
+
+/**
+ * Checked after every write, not after every command.
+ *
+ * Invariant 2 - a balance equals the sum of that account's own postings - is the load-bearing
+ * one: it ties the model to the database, and every other assertion made against the model is
+ * an assertion about real data only because it holds.
+ *
+ * Read commands write nothing the model would need to catch up on, so re-running this whole
+ * sweep after one re-asserts a claim about a database that has not changed since the last write
+ * command's sweep already checked it. `ReadBalanceCommand` and `ReadTrialBalanceCommand` make
+ * only their own narrow assertion instead; `PostEntryCommand` and `ReverseEntryCommand` are the
+ * ones that call this.
+ */
+export async function assertInvariants(model: LedgerModel, real: Real): Promise<void> {
+  // 1. The book sums to zero in every currency.
+  for (const [currency, total] of model.totalsByCurrency()) {
+    expect(total, `the model's ${currency} total`).toBe(0n);
+  }
+
+  // 2. Every balance is the sum of that account's postings.
+  for (const account of model.accounts) {
+    const actual = await real.service.getBalance(real.bookId, account.id);
+    expect(actual.balance.amountMinor, `balance of ${account.name}`).toBe(
+      model.balanceOf(account.id),
+    );
+  }
+
+  // 3. The trial balance agrees, account by account, and states that it balances.
+  await assertTrialBalance(model, real);
 
   // 4. No guarded account's minimum running balance is below zero.
   await assertGuardedPrefixes(model, { bookId: real.bookId, unitOfWork: real.unitOfWork });
@@ -181,8 +199,6 @@ export class ReadBalanceCommand implements LedgerCommand {
     expect(actual.balance.amountMinor, `balance of ${account.name}`).toBe(
       model.balanceOf(account.id),
     );
-
-    await assertInvariants(model, real);
   }
 
   toString(): string {
@@ -196,7 +212,7 @@ export class ReadTrialBalanceCommand implements LedgerCommand {
   }
 
   async run(model: LedgerModel, real: Real): Promise<void> {
-    await assertInvariants(model, real);
+    await assertTrialBalance(model, real);
   }
 
   toString(): string {
