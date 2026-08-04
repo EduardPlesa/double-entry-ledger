@@ -62,10 +62,13 @@ describe('listPostings', () => {
     expect(small.result.items).toHaveLength(1);
     expect(large.result.items).toHaveLength(50);
 
+    // Compares the statements themselves, not just how many there were: the same count with one
+    // query swapped for a different one of equal count would pass a length check and should not
+    // pass this one.
     expect(
-      large.statements.length,
+      large.statements,
       `page of 50 sent:\n${large.statements.join('\n')}\n\npage of 1 sent:\n${small.statements.join('\n')}`,
-    ).toBe(small.statements.length);
+    ).toEqual(small.statements);
   });
 
   it('sends a fixed number of statements on the first page', async () => {
@@ -112,9 +115,10 @@ describe('trialBalance', () => {
     const large = await recorder.measure(() => service.trialBalance(wide.bookId));
 
     expect(small.result.accounts.length).toBeLessThan(large.result.accounts.length);
-    expect(
-      large.statements.length,
-      `wide book sent:\n${large.statements.join('\n')}`,
-    ).toBe(small.statements.length);
+    // Compares the statements themselves, not just how many there were - see the comment on the
+    // equivalent assertion in the `listPostings` block above.
+    expect(large.statements, `wide book sent:\n${large.statements.join('\n')}`).toEqual(
+      small.statements,
+    );
   });
 });
