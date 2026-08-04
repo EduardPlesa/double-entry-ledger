@@ -93,6 +93,18 @@ describe.each(STRATEGIES)('a generated concurrent batch under %s', (strategy) =>
           expect(Number(rows[0]?.count ?? '0'), 'committed entries against fulfilled calls').toBe(
             outcome.accepted,
           );
+
+          // Vacuity guard. Every assertion above is satisfied by a run in which *every*
+          // transfer was refused: the errors are all AccountOverdrawnError, the book still
+          // sums to zero, cash is untouched and therefore non-negative, and zero committed
+          // entries equals zero accepted calls. Amounts here are always 1_000-30_000 against
+          // OPENING (50_000n), so under row-lock at least one transfer must always commit -
+          // writers block rather than fail, and the first one through never has anything to
+          // contend with. Under serializable a batch that exhausts every retry is a legitimate
+          // outcome (see overdraft.race.test.ts), so this is not asserted there.
+          if (strategy === 'row-lock') {
+            expect(outcome.accepted, 'every transfer was refused').toBeGreaterThan(0);
+          }
         },
       ),
       // The corpus replays before anything is generated. It is also the only reproducibility
