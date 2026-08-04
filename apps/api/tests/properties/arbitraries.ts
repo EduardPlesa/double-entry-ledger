@@ -42,8 +42,18 @@ export const OCCURRED_AT_CHOICES = [
  */
 const MAX_LEG_MINOR = 20_000n;
 
+/**
+ * An account by its position in the book's account list, not by id.
+ *
+ * The account list itself - six accounts, this order, these currencies - is the same for every
+ * generated case; only the ids inside it differ, and those are assigned by Postgres when a
+ * case's book is seeded, long after this arbitrary is built. Carrying an index instead of an id
+ * is what lets `ledgerCommands` be built once, from the fixture's fixed shape, rather than once
+ * per case from that case's real accounts - see `ledger.property.test.ts`. The index is resolved
+ * against the real book's account list at the point a command runs, where that list exists.
+ */
 export interface LegSpec {
-  readonly accountId: string;
+  readonly accountIndex: number;
   readonly amountMinor: bigint;
   readonly currency: string;
 }
@@ -54,12 +64,19 @@ export interface EntrySpec {
   readonly legs: readonly LegSpec[];
 }
 
-/** An entry, in one currency or in two, always balanced within each. */
+/**
+ * An entry, in one currency or in two, always balanced within each.
+ *
+ * `accounts` only needs to carry the book's shape - how many accounts, in what order, in which
+ * currency - not real ids: this can be, and in `ledger.property.test.ts` is, a book seeded once
+ * purely to learn that shape, reused for every generated case.
+ */
 export function entrySpec(accounts: readonly AccountRecord[]): fc.Arbitrary<EntrySpec> {
   const currencies = [...new Set(accounts.map((account) => account.currency))].sort();
 
+  const slots = accounts.map((account, index) => ({ index, currency: account.currency }));
   const groups = currencies.map((currency) =>
-    balancedGroup(accounts.filter((account) => account.currency === currency)),
+    balancedGroup(slots.filter((slot) => slot.currency === currency)),
   );
 
   return fc
@@ -80,6 +97,12 @@ export function entrySpec(accounts: readonly AccountRecord[]): fc.Arbitrary<Entr
     );
 }
 
+/** A position in the book's account list, tagged with that account's currency. */
+interface AccountSlot {
+  readonly index: number;
+  readonly currency: string;
+}
+
 /**
  * Two to four accounts of one currency, with amounts summing to zero and no zero leg.
  *
@@ -88,50 +111,65 @@ export function entrySpec(accounts: readonly AccountRecord[]): fc.Arbitrary<Entr
  * to 1 rather than filtered out, because `postEntry` refuses a zero leg and a filter here would
  * throw away most of the sample.
  */
-function balancedGroup(inCurrency: readonly AccountRecord[]): fc.Arbitrary<LegSpec[]> {
+function balancedGroup(inCurrency: readonly AccountSlot[]): fc.Arbitrary<LegSpec[]> {
   const currency = inCurrency[0]?.currency ?? 'EUR';
-  const ids = inCurrency.map((account) => account.id);
+  const indices = inCurrency.map((slot) => slot.index);
 
   return fc
-    .uniqueArray(fc.constantFrom(...ids), {
+    .uniqueArray(fc.constantFrom(...indices), {
       minLength: 2,
-      maxLength: Math.min(4, ids.length),
+      maxLength: Math.min(4, indices.length),
     })
-    .chain((chosenIds) =>
+    .chain((chosenIndices) =>
       fc
         .array(fc.bigInt({ min: -MAX_LEG_MINOR, max: MAX_LEG_MINOR }), {
-          minLength: chosenIds.length - 1,
-          maxLength: chosenIds.length - 1,
+          minLength: chosenIndices.length - 1,
+          maxLength: chosenIndices.length - 1,
         })
         .map((heads) => {
           const leading = heads.map((amount) => (amount === 0n ? 1n : amount));
           const last = -leading.reduce((total, amount) => total + amount, 0n);
 
-          return { chosenIds, amounts: [...leading, last] };
+          return { chosenIndices, amounts: [...leading, last] };
         }),
     )
     // Only the closing leg can still be zero: it is zero exactly when the leading legs already
     // cancel. Rare, and cheaper to discard than to reshape.
     .filter(({ amounts }) => amounts.every((amount) => amount !== 0n))
-    .map(({ chosenIds, amounts }) =>
-      chosenIds.map((accountId, index) => ({
-        accountId,
+    .map(({ chosenIndices, amounts }) =>
+      chosenIndices.map((accountIndex, index) => ({
+        accountIndex,
         amountMinor: amounts[index] as bigint,
         currency,
       })),
     );
 }
 
-/** The spec as the service's input: amounts as decimal strings, never as numbers. */
-export function toPostEntryInput(spec: EntrySpec): PostEntryInput {
+/**
+ * The spec as the service's input: amounts as decimal strings, never as numbers.
+ *
+ * `accounts` here is the real, per-case book - unlike the shape passed to `entrySpec`, this one
+ * has to carry real ids, because this is the point a generated index finally becomes a request
+ * the service can act on.
+ */
+export function toPostEntryInput(
+  spec: EntrySpec,
+  accounts: readonly AccountRecord[],
+): PostEntryInput {
   return {
     occurredAt: spec.occurredAt,
     description: spec.description,
-    legs: spec.legs.map((leg) => ({
-      accountId: leg.accountId,
-      amount: formatMoney(money(leg.amountMinor, leg.currency)),
-      currency: leg.currency,
-    })),
+    legs: spec.legs.map((leg) => {
+      const account = accounts[leg.accountIndex];
+      if (account === undefined) {
+        throw new Error(`no account at index ${leg.accountIndex.toString()}`);
+      }
+      return {
+        accountId: account.id,
+        amount: formatMoney(money(leg.amountMinor, leg.currency)),
+        currency: leg.currency,
+      };
+    }),
   };
 }
 
@@ -145,7 +183,7 @@ export function toPostEntryInput(spec: EntrySpec): PostEntryInput {
  */
 export function hasNegativeGuardedLeg(spec: EntrySpec, model: LedgerModel): boolean {
   return spec.legs.some((leg) => {
-    const account = model.accountById(leg.accountId);
+    const account = model.accounts[leg.accountIndex];
     return account !== undefined && isGuardedAccountType(account.type) && leg.amountMinor < 0n;
   });
 }
