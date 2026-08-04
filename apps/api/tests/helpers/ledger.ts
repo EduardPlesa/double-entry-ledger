@@ -1,5 +1,6 @@
 import { newId } from '@ledger/shared';
 import type { Pool, PoolClient } from 'pg';
+import type { AccountRecord } from '../../src/repositories/ledger.repository.js';
 
 /**
  * Amounts are passed to the driver as strings and read back as strings.
@@ -89,6 +90,33 @@ export async function seedBook(client: PoolClient): Promise<Book> {
     cashUsd: await account('Cash USD', 'asset', 'USD'),
     salesUsd: await account('Sales USD', 'revenue', 'USD'),
   };
+}
+
+/**
+ * The fixture's accounts as records, without a round trip to read back what we just wrote.
+ *
+ * `seedBook` creates exactly these six and nothing closes them, so the shape is known. A query
+ * here would be a query against `accounts` needing its own book-scoped transaction, to learn
+ * what the function right above already knows. Kept beside `seedBook` deliberately - the two
+ * restate the same six accounts in two shapes (an SQL insert versus a plain object), and there
+ * is nothing enforcing that they stay in step beyond both being visible in the same diff.
+ */
+export function accountsOf(book: Book): AccountRecord[] {
+  const record = (
+    id: string,
+    name: string,
+    type: AccountRecord['type'],
+    currency: string,
+  ): AccountRecord => ({ id, bookId: book.bookId, name, type, currency, closedAt: null });
+
+  return [
+    record(book.cash, 'Cash', 'asset', 'EUR'),
+    record(book.bank, 'Bank', 'asset', 'EUR'),
+    record(book.sales, 'Sales', 'revenue', 'EUR'),
+    record(book.rent, 'Rent', 'expense', 'EUR'),
+    record(book.cashUsd, 'Cash USD', 'asset', 'USD'),
+    record(book.salesUsd, 'Sales USD', 'revenue', 'USD'),
+  ];
 }
 
 /** `seedBook` in a transaction of its own, for callers that only want the fixture. */

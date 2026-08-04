@@ -67,6 +67,49 @@ export async function fireConcurrently(
   };
 }
 
+/** One transfer between two accounts of the same currency. */
+export interface TransferSpec {
+  readonly fromAccountId: string;
+  readonly toAccountId: string;
+  readonly amountMinor: bigint;
+}
+
+/**
+ * Fires an arbitrary batch of transfers at once and reports how each ended.
+ *
+ * `fireConcurrently` fires N copies of one withdrawal, which is the right shape for a test
+ * about a known race. This takes a list, because a property generates the batch rather than
+ * repeating it, and the interesting batches are the uneven ones.
+ */
+export async function fireTransfers(
+  service: LedgerService,
+  book: Book,
+  transfers: readonly TransferSpec[],
+): Promise<{ accepted: number; rejected: number; errors: unknown[] }> {
+  const attempts = transfers.map((transfer, index) =>
+    service.postEntry(book.bookId, {
+      occurredAt: '2026-02-01T00:00:00.000Z',
+      description: `concurrent transfer ${index.toString()}`,
+      legs: [
+        {
+          accountId: transfer.fromAccountId,
+          amount: decimal(-transfer.amountMinor),
+          currency: 'EUR',
+        },
+        { accountId: transfer.toAccountId, amount: decimal(transfer.amountMinor), currency: 'EUR' },
+      ],
+    }),
+  );
+
+  const settled = await Promise.allSettled(attempts);
+
+  return {
+    accepted: settled.filter((result) => result.status === 'fulfilled').length,
+    rejected: settled.filter((result) => result.status === 'rejected').length,
+    errors: settled.flatMap((result) => (result.status === 'rejected' ? [result.reason] : [])),
+  };
+}
+
 /** Minor units as the decimal string the service's input schema expects. €12.34 from 1234n. */
 function decimal(amountMinor: bigint): string {
   const negative = amountMinor < 0n;

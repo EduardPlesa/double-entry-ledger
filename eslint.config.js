@@ -3,7 +3,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 /**
- * The rule this file exists for is the last one: `process.env` is readable in exactly two
+ * The rule this file exists for is the last one: `process.env` is readable in exactly three
  * places, and nowhere else.
  *
  * A convention in a README is a convention until someone new adds one `process.env.FOO ??
@@ -66,6 +66,19 @@ export default tseslint.config(
 
   {
     files: ['apps/api/src/config.ts', 'apps/api/drizzle.config.ts'],
+    rules: {
+      'no-restricted-properties': 'off',
+      'no-restricted-syntax': 'off',
+    },
+  },
+
+  {
+    // `tests/properties/runs.ts` reads `LEDGER_PROPERTY_RUNS`, so CI can raise how many cases a
+    // property runs without a third place that knows how to read configuration. Scoped to that
+    // one file by exact path, the same way the block above singles out `config.ts` and
+    // `drizzle.config.ts` - `runs.ts`'s own doc comment is what says it is the only file in the
+    // test tree meant to use this.
+    files: ['apps/api/tests/properties/runs.ts'],
     rules: {
       'no-restricted-properties': 'off',
       'no-restricted-syntax': 'off',

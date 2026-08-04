@@ -15,6 +15,7 @@
     "uuidv7": "1.2.1"
   },
   "devDependencies": {
+    "fast-check": "4.9.0",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   }
