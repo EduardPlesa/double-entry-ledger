@@ -4,7 +4,7 @@ import { DrizzleUnitOfWork, createDatabase, type UnitOfWork } from '../../src/db
 import { isGuardedAccountType } from '../../src/domain/overdraft.js';
 import type { AccountRecord, EntryRecord } from '../../src/repositories/ledger.repository.js';
 import type { LedgerService } from '../../src/services/ledger.service.js';
-import { seedBookIn, type Book } from '../helpers/ledger.js';
+import { accountsOf, seedBookIn } from '../helpers/ledger.js';
 import { createService } from '../helpers/service.js';
 import { LedgerModel } from './model.js';
 
@@ -131,29 +131,4 @@ export async function createPropertyBook(pool: Pool): Promise<PropertyBook> {
       return model;
     },
   };
-}
-
-/**
- * The fixture's accounts as records, without a round trip to read back what we just wrote.
- *
- * `seedBook` creates exactly these six and nothing closes them, so the shape is known. A query
- * here would be a query against `accounts` needing its own book-scoped transaction, to learn
- * what the helper that created them already knows.
- */
-function accountsOf(book: Book): AccountRecord[] {
-  const record = (
-    id: string,
-    name: string,
-    type: AccountRecord['type'],
-    currency: string,
-  ): AccountRecord => ({ id, bookId: book.bookId, name, type, currency, closedAt: null });
-
-  return [
-    record(book.cash, 'Cash', 'asset', 'EUR'),
-    record(book.bank, 'Bank', 'asset', 'EUR'),
-    record(book.sales, 'Sales', 'revenue', 'EUR'),
-    record(book.rent, 'Rent', 'expense', 'EUR'),
-    record(book.cashUsd, 'Cash USD', 'asset', 'USD'),
-    record(book.salesUsd, 'Sales USD', 'revenue', 'USD'),
-  ];
 }
