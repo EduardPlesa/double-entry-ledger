@@ -137,8 +137,4 @@ export class LedgerModel {
   reversibleEntries(): readonly ModelEntry[] {
     return this.entries.filter((entry) => entry.reversedBy === null);
   }
-
-  entryCount(): number {
-    return this.entries.length;
-  }
 }

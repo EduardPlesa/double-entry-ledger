@@ -24,9 +24,11 @@ import { createService } from '../helpers/service.js';
  * non-negative and the book adding up are both true of a run in which all sixteen requests
  * failed - with a deadlock, with an exhausted retry loop, or with a 500 from a write path that
  * had stopped working altogether. A suite that checked only those would have stayed green
- * through exactly the regression it exists to catch, so the accepted count is pinned to the
- * number the money allows and every rejection has to be the domain error that means "you
- * cannot afford this", rather than any error at all.
+ * through exactly the regression it exists to catch, so the accepted count is bounded by what
+ * the money allows - pinned exactly under `row-lock`, capped and required to be non-zero under
+ * `serializable` (see `expectAffordableAccepted`) - and every rejection has to be the domain
+ * error that means "you cannot afford this", or, under `serializable`, a retry exhausted by
+ * genuine contention.
  */
 
 const ROUNDS = 5;
