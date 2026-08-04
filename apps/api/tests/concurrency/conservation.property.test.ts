@@ -7,6 +7,7 @@ import { AccountOverdrawnError } from '../../src/domain/errors.js';
 import { fireTransfers, fundedBook, type TransferSpec } from '../helpers/concurrency.js';
 import { balanceOf, queryInBook } from '../helpers/ledger.js';
 import { createService } from '../helpers/service.js';
+import { CONCURRENT_BATCH_EXAMPLES } from '../properties/regressions.js';
 
 /**
  * Value conservation and the overdraft rule, over generated batches fired for real.
@@ -94,7 +95,10 @@ describe.each(STRATEGIES)('a generated concurrent batch under %s', (strategy) =>
           );
         },
       ),
-      { numRuns: RUNS },
+      // The corpus replays before anything is generated. It is also the only reproducibility
+      // this property has: the batch shape is generated, but which transfer wins is a race, so
+      // a failing shape is worth pinning even though replaying it may not fail again.
+      { numRuns: RUNS, examples: CONCURRENT_BATCH_EXAMPLES },
     );
   });
 });
