@@ -1,3 +1,5 @@
+import type { LedgerCommand } from './commands.js';
+
 /**
  * Counterexamples this suite has actually found, replayed on every run.
  *
@@ -10,12 +12,18 @@
  * property finds something, transcribe the shrunk case below with a comment naming the defect,
  * and write the story into the README's property-testing section.
  *
- * **The command property is not covered here.** `ledger.property.test.ts` draws its sequence
- * through `fc.gen()`, whose inputs are a stream of generator draws rather than a value anyone
- * can write down. A counterexample from that property gets transcribed as an ordinary
- * `it()` in `tests/properties/` that replays the shrunk command sequence by hand against a
- * fresh book — which is a better regression test anyway, because it names the sequence instead
- * of encoding it.
+ * **The command property is covered here too.** `ledgerCommands` (`commands.ts`) is a plain
+ * arbitrary — it generates account *indices*, resolved against whichever real book a case runs
+ * against inside each command's `run()`, so it no longer needs `fc.gen()` to defer generation
+ * until a book exists. That means a failing sequence shrinks and replays like any other
+ * property, and a shrunk counterexample can be transcribed into `LEDGER_COMMAND_EXAMPLES`
+ * below as a one-tuple `[commands]`, matching the other two arrays here: build the array of
+ * commands fast-check printed - each command class (`PostEntryCommand`, `ReverseEntryCommand`,
+ * `ReadBalanceCommand`, `ReadPostingsCommand`, `ReadTrialBalanceCommand`, all exported from
+ * `commands.ts`) takes the same constructor arguments shown in the failure output, plus a
+ * `Tally` to accumulate into - a fresh all-zero one is fine, since the coverage guard in
+ * `ledger.property.test.ts` only needs the *generated* cases to clear it, not the replayed
+ * examples.
  */
 
 // fast-check's `examples` option types as `T[]`, not `readonly T[]` — these stay mutable to
@@ -27,3 +35,6 @@ export const HTTP_AMOUNT_EXAMPLES: [bigint][] = [];
 
 /** Batch shapes that broke conservation. Tuples matching the amounts array in `conservation.property.test.ts`. */
 export const CONCURRENT_BATCH_EXAMPLES: [bigint[]][] = [];
+
+/** Command sequences that broke a ledger invariant. Each entry is one full sequence, transcribed by hand. */
+export const LEDGER_COMMAND_EXAMPLES: [Iterable<LedgerCommand>][] = [];

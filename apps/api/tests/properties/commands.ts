@@ -15,6 +15,9 @@ import { assertGuardedPrefixes } from './prefix.js';
  * that exists and has not already been reversed, which a flat array either cannot express or
  * expresses with indices that shrinking mangles. Commands also shrink to a minimal *sequence*,
  * which is the artifact worth promoting into a regression test.
+ *
+ * The command classes are exported so a shrunk sequence can be transcribed by hand into
+ * `LEDGER_COMMAND_EXAMPLES` in `regressions.ts` - see the comment there for how.
  */
 
 export interface Real {
@@ -105,7 +108,7 @@ export async function assertInvariants(model: LedgerModel, real: Real): Promise<
   await assertGuardedPrefixes(model, { bookId: real.bookId, unitOfWork: real.unitOfWork });
 }
 
-class PostEntryCommand implements LedgerCommand {
+export class PostEntryCommand implements LedgerCommand {
   constructor(
     private readonly spec: EntrySpec,
     private readonly tally: Tally,
@@ -117,7 +120,10 @@ class PostEntryCommand implements LedgerCommand {
 
   async run(model: LedgerModel, real: Real): Promise<void> {
     try {
-      const { entry } = await real.service.postEntry(real.bookId, toPostEntryInput(this.spec));
+      const { entry } = await real.service.postEntry(
+        real.bookId,
+        toPostEntryInput(this.spec, model.accounts),
+      );
 
       model.record({
         id: entry.id,
@@ -154,13 +160,13 @@ class PostEntryCommand implements LedgerCommand {
 
   toString(): string {
     const legs = this.spec.legs
-      .map((leg) => `${leg.accountId.slice(0, 8)}:${leg.amountMinor.toString()}`)
+      .map((leg) => `#${leg.accountIndex.toString()}:${leg.amountMinor.toString()}`)
       .join(' ');
     return `PostEntry(${this.spec.occurredAt} ${legs})`;
   }
 }
 
-class ReadBalanceCommand implements LedgerCommand {
+export class ReadBalanceCommand implements LedgerCommand {
   constructor(private readonly index: number) {}
 
   check(model: LedgerModel): boolean {
@@ -184,7 +190,7 @@ class ReadBalanceCommand implements LedgerCommand {
   }
 }
 
-class ReadTrialBalanceCommand implements LedgerCommand {
+export class ReadTrialBalanceCommand implements LedgerCommand {
   check(): boolean {
     return true;
   }
@@ -198,7 +204,7 @@ class ReadTrialBalanceCommand implements LedgerCommand {
   }
 }
 
-class ReverseEntryCommand implements LedgerCommand {
+export class ReverseEntryCommand implements LedgerCommand {
   constructor(
     private readonly index: number,
     private readonly tally: Tally,
@@ -266,7 +272,7 @@ class ReverseEntryCommand implements LedgerCommand {
   }
 }
 
-class ReadPostingsCommand implements LedgerCommand {
+export class ReadPostingsCommand implements LedgerCommand {
   constructor(private readonly index: number) {}
 
   check(model: LedgerModel): boolean {
