@@ -277,17 +277,21 @@ class ReadPostingsCommand implements LedgerCommand {
     const account = model.accounts[this.index % model.accounts.length];
     if (account === undefined) return;
 
-    // A small page on purpose: the running balance of page two opens from a fresh
-    // sum-from-zero up to the cursor, and a page size that never forces a second page would
-    // never exercise it.
+    // One posting per page: the running balance of page two opens from a fresh sum-from-zero up
+    // to the cursor, and this is what makes crossing that seam certain on every account with two
+    // or more postings, rather than merely probable at whatever page size happened to outrun the
+    // generator. The cost is bounded because a generated account holds only a handful of
+    // postings.
     const collected: { id: bigint; amountMinor: bigint; runningBalance: bigint }[] = [];
     let cursor: string | undefined;
+    let pageCount = 0;
 
     do {
       const page = await real.service.listPostings(real.bookId, account.id, {
-        limit: 3,
+        limit: 1,
         ...(cursor === undefined ? {} : { cursor }),
       });
+      pageCount += 1;
 
       for (const item of page.items) {
         collected.push({
@@ -299,6 +303,17 @@ class ReadPostingsCommand implements LedgerCommand {
 
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
+
+    // The page-two seam is only exercised if an account with room to page actually paged.
+    // Zero or one posting legitimately fits on one page, so the assertion only applies once the
+    // model holds two or more.
+    const modelPostingCount = model.postingsOf(account.id).length;
+    if (modelPostingCount >= 2) {
+      expect(
+        pageCount,
+        `${account.name} has ${modelPostingCount.toString()} postings but took only one page`,
+      ).toBeGreaterThan(1);
+    }
 
     // The page set is the account's postings, no more and no fewer.
     const expectedAmounts = model
