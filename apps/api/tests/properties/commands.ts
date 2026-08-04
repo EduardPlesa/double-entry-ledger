@@ -266,6 +266,76 @@ class ReverseEntryCommand implements LedgerCommand {
   }
 }
 
+class ReadPostingsCommand implements LedgerCommand {
+  constructor(private readonly index: number) {}
+
+  check(model: LedgerModel): boolean {
+    return model.accounts.length > 0;
+  }
+
+  async run(model: LedgerModel, real: Real): Promise<void> {
+    const account = model.accounts[this.index % model.accounts.length];
+    if (account === undefined) return;
+
+    // A small page on purpose: the running balance of page two opens from a fresh
+    // sum-from-zero up to the cursor, and a page size that never forces a second page would
+    // never exercise it.
+    const collected: { id: bigint; amountMinor: bigint; runningBalance: bigint }[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const page = await real.service.listPostings(real.bookId, account.id, {
+        limit: 3,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+
+      for (const item of page.items) {
+        collected.push({
+          id: item.id,
+          amountMinor: item.amount.amountMinor,
+          runningBalance: item.runningBalance.amountMinor,
+        });
+      }
+
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+
+    // The page set is the account's postings, no more and no fewer.
+    const expectedAmounts = model
+      .postingsOf(account.id)
+      .slice()
+      .sort((left, right) => left.seq - right.seq)
+      .map((posting) => posting.amountMinor);
+
+    expect(
+      collected.map((line) => line.amountMinor),
+      `postings listed for ${account.name}`,
+    ).toEqual(expectedAmounts);
+
+    // Every row's running balance is the true prefix sum in cursor order. Checking only the
+    // last row would pass for a page that got every intermediate value wrong and happened to
+    // end in the right place.
+    let running = 0n;
+    for (const [position, line] of collected.entries()) {
+      running += line.amountMinor;
+      expect(
+        line.runningBalance,
+        `running balance at row ${position.toString()} of ${account.name}`,
+      ).toBe(running);
+    }
+
+    // Cursor order is posting-id order, which is insertion order and not `occurred_at` order.
+    const ids = collected.map((line) => line.id);
+    expect([...ids].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))).toEqual(ids);
+
+    await assertInvariants(model, real);
+  }
+
+  toString(): string {
+    return `ReadPostings(#${this.index.toString()})`;
+  }
+}
+
 export function ledgerCommands(
   accounts: readonly AccountRecord[],
   tally: Tally,
@@ -282,6 +352,7 @@ export function ledgerCommands(
       entrySpec(accounts).map((spec): LedgerCommand => new PostEntryCommand(spec, tally)),
       fc.nat().map((index): LedgerCommand => new ReverseEntryCommand(index, tally)),
       fc.nat().map((index): LedgerCommand => new ReadBalanceCommand(index)),
+      fc.nat().map((index): LedgerCommand => new ReadPostingsCommand(index)),
       fc.constant(new ReadTrialBalanceCommand()),
     ],
     { maxCommands: 12 },
