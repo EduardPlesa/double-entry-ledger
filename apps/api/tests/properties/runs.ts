@@ -5,8 +5,9 @@
  * has to stay something people run while editing. CI raises it, which is where the properties
  * earn their keep.
  *
- * `process.env` is banned everywhere but `config.ts`; `eslint.config.js` exempts
- * `apps/api/tests/**`, and this is the only place in the test tree that uses the exemption.
+ * `process.env` is banned everywhere but `config.ts` and `drizzle.config.ts`. `eslint.config.js`
+ * exempts this file by name - not the test tree - so the ban stays enforced everywhere else and
+ * a second reader would have to argue for itself rather than inherit an exemption.
  */
 export function propertyRuns(fallback = 25): number {
   const raw = process.env.LEDGER_PROPERTY_RUNS;

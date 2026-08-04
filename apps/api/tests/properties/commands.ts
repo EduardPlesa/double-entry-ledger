@@ -100,10 +100,16 @@ export async function assertTrialBalance(model: LedgerModel, real: Real): Promis
  * an assertion about real data only because it holds.
  *
  * Read commands write nothing the model would need to catch up on, so re-running this whole
- * sweep after one re-asserts a claim about a database that has not changed since the last write
- * command's sweep already checked it. `ReadBalanceCommand` and `ReadTrialBalanceCommand` make
- * only their own narrow assertion instead; `PostEntryCommand` and `ReverseEntryCommand` are the
- * ones that call this.
+ * sweep after one re-asserts a claim about a database that has not changed. `ReadBalanceCommand`
+ * and `ReadTrialBalanceCommand` make only their own narrow assertion instead.
+ *
+ * The callers are therefore `PostEntryCommand`, `ReverseEntryCommand` and `ReadPostingsCommand` -
+ * the last of those because it pages an account to exhaustion and its own assertions are about
+ * that account alone, so it is the one read worth the whole sweep.
+ *
+ * The property calls this once more after the sequence finishes. Both read commands accept
+ * unconditionally, so a short sequence can consist of nothing else, and without that final call
+ * a case like it would never put invariants 1 and 4 to the database at all.
  */
 export async function assertInvariants(model: LedgerModel, real: Real): Promise<void> {
   // 1. The book sums to zero in every currency.
