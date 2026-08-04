@@ -187,6 +187,72 @@ class ReadTrialBalanceCommand implements LedgerCommand {
   }
 }
 
+class ReverseEntryCommand implements LedgerCommand {
+  constructor(
+    private readonly index: number,
+    private readonly tally: Tally,
+  ) {}
+
+  check(model: LedgerModel): boolean {
+    // An entry may be reversed at most once, enforced by a partial unique index on
+    // `reversal_of`. Picking only from the unreversed ones keeps the command valid rather than
+    // making the harness assert about a conflict the generator caused.
+    return model.reversibleEntries().length > 0;
+  }
+
+  async run(model: LedgerModel, real: Real): Promise<void> {
+    const candidates = model.reversibleEntries();
+    const original = candidates[this.index % candidates.length];
+    if (original === undefined) return;
+
+    // 5. A reversal changes each affected balance by exactly the negation of the original's
+    // legs. The brief phrases this as "post an entry then reverse it restores the balance",
+    // which is the special case where nothing landed in between; this form is stronger and
+    // stays checkable in the middle of a sequence, which is where it actually runs.
+    const before = new Map(
+      model.accounts.map((account) => [account.id, model.balanceOf(account.id)]),
+    );
+
+    try {
+      const reversal = await real.service.reverseEntry(real.bookId, original.id);
+
+      model.record({
+        id: reversal.id,
+        occurredAt: reversal.occurredAt,
+        legs: reversal.postings.map((posting) => ({
+          accountId: posting.accountId,
+          amountMinor: posting.amountMinor,
+        })),
+      });
+      model.markReversed(original.id, reversal.id);
+
+      const delta = new Map<string, bigint>();
+      for (const leg of original.legs) {
+        delta.set(leg.accountId, (delta.get(leg.accountId) ?? 0n) - leg.amountMinor);
+      }
+
+      for (const account of model.accounts) {
+        const expected = (before.get(account.id) ?? 0n) + (delta.get(account.id) ?? 0n);
+        expect(model.balanceOf(account.id), `${account.name} after reversing ${original.id}`).toBe(
+          expected,
+        );
+      }
+    } catch (error) {
+      // The invariant is a property of the data, not of how the data arrived: a reversal that
+      // would drive a guarded account short is refused like any other entry. Nothing is
+      // recorded, no delta is asserted, and the entry stays reversible.
+      if (!(error instanceof AccountOverdrawnError)) throw error;
+      this.tally.refused += 1;
+    }
+
+    await assertInvariants(model, real);
+  }
+
+  toString(): string {
+    return `ReverseEntry(#${this.index.toString()})`;
+  }
+}
+
 export function ledgerCommands(
   accounts: readonly AccountRecord[],
   tally: Tally,
@@ -201,6 +267,7 @@ export function ledgerCommands(
       // and the interesting states are the ones several entries deep.
       entrySpec(accounts).map((spec): LedgerCommand => new PostEntryCommand(spec, tally)),
       entrySpec(accounts).map((spec): LedgerCommand => new PostEntryCommand(spec, tally)),
+      fc.nat().map((index): LedgerCommand => new ReverseEntryCommand(index, tally)),
       fc.nat().map((index): LedgerCommand => new ReadBalanceCommand(index)),
       fc.constant(new ReadTrialBalanceCommand()),
     ],
