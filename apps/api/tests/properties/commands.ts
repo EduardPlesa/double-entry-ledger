@@ -24,10 +24,21 @@ export interface Real {
   readonly unitOfWork: UnitOfWork;
 }
 
-/** Accept/refuse counts across a whole run. See `tally` in `ledger.property.test.ts`. */
+/**
+ * Accept/refuse counts across a whole run. See `tally` in `ledger.property.test.ts`.
+ *
+ * `accepted`/`refused` belong to `PostEntryCommand` alone; `reversalsAccepted`/
+ * `reversalsRefused` belong to `ReverseEntryCommand` alone. The two pairs are kept apart
+ * rather than merged into one because they were calibrated separately - `accepted` >
+ * `refused` was measured against post-only runs - and folding reversal outcomes into either
+ * side shifts a ratio the guard depends on for reasons that have nothing to do with an
+ * invariant breaking.
+ */
 export interface Tally {
   accepted: number;
   refused: number;
+  reversalsAccepted: number;
+  reversalsRefused: number;
 }
 
 export type LedgerCommand = fc.AsyncCommand<LedgerModel, Real>;
@@ -237,12 +248,14 @@ class ReverseEntryCommand implements LedgerCommand {
           expected,
         );
       }
+
+      this.tally.reversalsAccepted += 1;
     } catch (error) {
       // The invariant is a property of the data, not of how the data arrived: a reversal that
       // would drive a guarded account short is refused like any other entry. Nothing is
       // recorded, no delta is asserted, and the entry stays reversible.
       if (!(error instanceof AccountOverdrawnError)) throw error;
-      this.tally.refused += 1;
+      this.tally.reversalsRefused += 1;
     }
 
     await assertInvariants(model, real);
