@@ -29,11 +29,16 @@ export const OCCURRED_AT_CHOICES = [
 ] as const;
 
 /**
- * Up to €200.00 a leg, against an opening balance of €1,000.00.
+ * Up to €200.00 a leg, against an opening balance of €160.00 - a single leg can exceed the
+ * whole opening balance on its own, not merely dent it.
  *
  * Chosen so refusals happen because the generator aimed at them: a handful of entries can spend
  * the account down, and the sequences that overdraw it are common enough to exercise the rule
  * without being so common that nothing else gets tested.
+ *
+ * The other half of the pair `OPENING_MINOR` (`fixture.ts`) was measured against. Changing this
+ * value without redoing that measurement can flip the coverage tally's `accepted > refused`
+ * assertion in `ledger.property.test.ts` from a reliable pass to a flaky one, or the reverse.
  */
 const MAX_LEG_MINOR = 20_000n;
 

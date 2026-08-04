@@ -13,7 +13,7 @@ import { LedgerModel } from './model.js';
  *
  * Funded because an empty book exercises one branch of the overdraft rule and nothing else:
  * every withdrawal from a zero balance is refused, the coverage guard fires, and the sequence
- * proves nothing. Every guarded account opens with €1,000.00 - or its currency's equivalent -
+ * proves nothing. Every guarded account opens with €160.00 - or its currency's equivalent -
  * dated before any generated entry, so history is well-founded before anything draws on it.
  *
  * A fresh book per case rather than a shared one, because this database has no teardown by
