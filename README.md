@@ -56,6 +56,71 @@ pnpm typecheck
 pnpm lint
 ```
 
+## Property-based tests
+
+The suites above pin the cases someone thought of. `apps/api/tests/properties/` states the same
+invariants as fast-check properties and lets the generator look for the cases nobody thought of —
+against the real database, because half of what this project asserts is enforced in migrations
+rather than in TypeScript.
+
+An `fc.commands` sequence drives `LedgerService` — post, reverse, read a balance, page through
+postings, read the trial balance — while an in-memory model is advanced alongside it. After every
+command:
+
+1. the book sums to zero in every currency
+2. every balance equals the sum of that account's own postings
+3. the trial balance agrees account by account, and its per-currency totals match the model's
+4. no guarded account's minimum running balance is below zero — computed twice, once by a SQL
+   window function and once by an array scan, which is what pins the `(occurred_at, id)`
+   tiebreaker
+5. a reversal changes each affected balance by exactly the negation of the original's legs
+
+The model **follows**: it records what the service accepted and never predicts a refusal, so the
+overdraft rule is not written a third time after migration `0007` and the service. The price is
+that a service refusing everything would satisfy all five, so a sixth invariant asserts the one
+class of entry that is *provably* acceptable — one carrying no negative leg on a guarded account
+cannot lower any prefix — and a tally across the run asserts acceptances stay the clear majority.
+The fixture's opening balance is tuned against that tally by measurement, not by taste: too
+generous and nothing is ever refused, too thin and the majority assertion fails.
+
+`LEDGER_PROPERTY_RUNS` sets the case count, defaulting to 25 so `pnpm test` stays usable. A pass
+at 200 takes about two minutes.
+
+### What it found
+
+An amount above `2^63 − 1` — the ceiling of the `bigint` column that stores minor units — passes
+every validation layer and then answers **HTTP 500**. `amount` is typed only as a string,
+`parseMoney` checks decimal shape and non-zero but never magnitude, and no domain error covers the
+case, so the request reaches the error middleware's catch-all and is logged as an unanticipated
+bug. That middleware special-cases malformed JSON precisely because it would otherwise be "a 500
+for what is unambiguously a client mistake"; an out-of-range amount is the same category and gets
+none of the same treatment. From the caller's side it is indistinguishable from a server fault.
+
+No example test would have found it, because nobody writes `9223372036854775808` by hand. The
+generator did, on its first run. The fix is production code and belongs to a later stage; the
+boundary property is bounded at the real ceiling meanwhile, with the reason stated at the constant.
+
+### The corpus
+
+`apps/api/tests/properties/regressions.ts` holds counterexamples this suite has found,
+transcribed and replayed on every run through fast-check's `examples` option — which, unlike a
+recorded seed, states what it defends against and survives the generators being rewritten.
+
+It is currently empty, and deliberately so. The one defect above cannot be expressed as an entry:
+the generator is now bounded below that ceiling, and a case the generator cannot produce cannot be
+replayed. Nothing was planted here to demonstrate the mechanism.
+
+### Query counting
+
+`apps/api/tests/services/query-count.test.ts` measures the statements a read path actually sends,
+counting at the driver rather than through the ORM — `BEGIN`, `set_config` and `COMMIT` are round
+trips too. It asserts that `listPostings` sends the same statements for a page of 1 as for a page
+of 50, and that the trial balance is invariant to how many accounts a book has.
+
+An N+1 returns exactly the right answer, just once per row, so it is invisible to every other test
+here. The exact counts are pinned beside the invariance assertions, with each statement named, so
+that replacing one is a deliberate edit rather than a silent drift.
+
 ## Layout
 
 ```

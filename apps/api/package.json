@@ -30,6 +30,7 @@
     "@types/pg": "8.20.0",
     "@types/supertest": "7.2.1",
     "dotenv": "17.4.2",
+    "fast-check": "4.9.0",
     "drizzle-kit": "0.31.10",
     "supertest": "7.2.2",
     "testcontainers": "12.0.4",

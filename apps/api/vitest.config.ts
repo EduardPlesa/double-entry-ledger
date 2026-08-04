@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * Three projects, because three kinds of test.
+ * Four projects, because four kinds of test.
  *
  * `unit` is pure computation - configuration parsing, the policy map, hashing, token
  * encoding - and needs nothing but Node. `integration` needs a real Postgres, which means
@@ -9,6 +9,12 @@ import { defineConfig } from 'vitest/config';
  * assertion runs. `concurrency` also needs that container, but not the single-worker
  * discipline `integration` runs under: its tests are the ones firing overlapping
  * transactions at the same pool on purpose, so it gets its own process pool instead.
+ *
+ * `properties` needs the same container as `integration` and the same single-worker
+ * discipline, but not its budget: a property run is tens of seconds where an integration file
+ * is a second. Folding it in would make every run of the suite people execute while editing
+ * pay for it, and the pressure would then be to shrink `numRuns` until the properties stopped
+ * being properties.
  *
  * Keeping them apart is not tidiness. A single project means a global setup that starts a
  * container for every run, so checking whether a regex is right requires Docker to be up -
@@ -57,6 +63,24 @@ export default defineConfig({
           // own pool and fires overlapping transactions through it. One file at a time, so
           // two files are never contending for the same container's connection slots.
           pool: 'forks',
+          fileParallelism: false,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
+          name: 'properties',
+          include: ['tests/properties/**/*.test.ts'],
+          globalSetup: ['./tests/setup/postgres.global.ts'],
+
+          // A single case is a book seed plus a few dozen round trips, and a run is dozens of
+          // cases. This is the real number, not padding.
+          testTimeout: 180_000,
+          hookTimeout: 120_000,
+
+          // Same discipline as `integration`: one book per case is what isolates these, and a
+          // single worker keeps failures readable and connection counts sane.
+          pool: 'threads',
           fileParallelism: false,
           maxWorkers: 1,
         },
