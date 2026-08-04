@@ -2400,10 +2400,27 @@ that acceptances stay the clear majority.
 
 `LEDGER_PROPERTY_RUNS` sets the case count; it defaults to 25 so `pnpm test` stays usable.
 
+**What it found.** An amount above `2^63 − 1` — the ceiling of the `bigint` column the ledger
+stores minor units in — is accepted by every validation layer and then answers **HTTP 500**.
+`amount` is typed only as a string, `parseMoney` checks decimal shape and non-zero but never
+magnitude, and no domain error covers the case, so the request falls through to the error
+middleware's catch-all and is logged as an unanticipated bug. That middleware special-cases
+malformed JSON precisely because "it would be a 500 for what is unambiguously a client mistake" —
+an out-of-range amount is the same category of mistake and gets none of the same treatment. From
+the caller's side it is indistinguishable from a server fault: no problem-document code, no field
+detail.
+
+No example test would have found it, because nobody writes `9223372036854775808` by hand. The
+generator did on its first run.
+
+The fix is production code and belongs to a later stage; the boundary property is bounded at the
+real ceiling meanwhile, with the reason stated at the constant.
+
 **The corpus.** `tests/properties/regressions.ts` holds counterexamples this suite has found,
 transcribed and replayed on every run through fast-check's `examples` option. It is currently
-empty — the properties have not yet found a defect, and nothing was planted here to demonstrate
-the mechanism.
+empty, and deliberately so: the one defect found above cannot be expressed as an entry, because
+the generator no longer produces values in that range and a case that cannot be generated cannot
+be replayed. Nothing was planted here to demonstrate the mechanism.
 
 **Query counting.** `tests/services/query-count.test.ts` measures the statements a read path
 actually sends, at the driver rather than through the ORM, and asserts that `listPostings` sends
@@ -2412,8 +2429,9 @@ account count. An N+1 returns exactly the right answer, just once per row, so it
 every other test in the suite.
 ```
 
-If step 2 found something, replace the corpus paragraph with the story instead: what the property
-generated, what shrinking reduced it to, and what was wrong.
+If step 2 finds something *further*, add it beside the out-of-range story: what the property
+generated, what shrinking reduced it to, and what was wrong. If it is a case the generators still
+produce, transcribe it into the corpus as well.
 
 - [ ] **Step 4: Commit**
 
