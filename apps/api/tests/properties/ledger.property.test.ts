@@ -31,7 +31,7 @@ describe('arbitrary sequences of valid entries', () => {
     // every state invariant above - vacuous truth is the standing failure mode of property
     // testing, and this is the guard against it. It also catches a generator that has drifted
     // into producing entries nothing will accept, which is the same failure and likelier.
-    const tally: Tally = { accepted: 0, refused: 0 };
+    const tally: Tally = { accepted: 0, refused: 0, reversalsAccepted: 0, reversalsRefused: 0 };
 
     await fc.assert(
       fc.asyncProperty(fc.gen(), async (gen) => {
@@ -58,5 +58,15 @@ describe('arbitrary sequences of valid entries', () => {
       tally.accepted,
       `only ${tally.accepted.toString()} of ${(tally.accepted + tally.refused).toString()} entries were accepted`,
     ).toBeGreaterThan(tally.refused);
+
+    // Reversal coverage is asserted separately from the post-entry counters above, in its own
+    // counters, so a generator that happens to weight `ReverseEntryCommand` differently cannot
+    // trip - or silently stop testing - the post-entry guard. Only the accepted branch is
+    // asserted here: measured over ten runs at the default `numRuns` (25), reversalsAccepted
+    // never fell below 14, but reversalsRefused was 0 in one of the ten. Asserting it greater
+    // than zero would reintroduce exactly the flakiness this fix exists to remove, so the
+    // refusal branch is exercised (see the delta-restoring assertion inside
+    // `ReverseEntryCommand.run`) without being required to occur in every run.
+    expect(tally.reversalsAccepted, 'no reversal was ever accepted').toBeGreaterThan(0);
   });
 });
