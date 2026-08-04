@@ -46,10 +46,6 @@ export class LedgerModel {
     this.byId = new Map(accounts.map((account) => [account.id, account]));
   }
 
-  accountById(accountId: string): AccountRecord | undefined {
-    return this.byId.get(accountId);
-  }
-
   /** Records an entry the service accepted. Legs take consecutive `seq` values, as ids do. */
   record(entry: { id: string; occurredAt: Date; legs: readonly ModelLeg[] }): void {
     this.entries.push({

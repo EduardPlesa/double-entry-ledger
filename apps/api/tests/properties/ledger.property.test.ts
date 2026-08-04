@@ -1,8 +1,10 @@
 import fc from 'fast-check';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { accountsOf, seedBookIn } from '../helpers/ledger.js';
 import { ledgerCommands, type Real, type Tally } from './commands.js';
 import { createPropertyBook } from './fixture.js';
+import { LEDGER_COMMAND_EXAMPLES } from './regressions.js';
 import { propertyRuns } from './runs.js';
 
 /**
@@ -33,8 +35,18 @@ describe('arbitrary sequences of valid entries', () => {
     // into producing entries nothing will accept, which is the same failure and likelier.
     const tally: Tally = { accepted: 0, refused: 0, reversalsAccepted: 0, reversalsRefused: 0 };
 
+    // A book seeded once, purely to learn the fixture's account shape - count, order, currency
+    // - and thrown away without a single entry posted against it. `ledgerCommands` only reads
+    // that shape (`entrySpec` groups by currency; see `arbitraries.ts`), never an id from it, so
+    // one throwaway book is enough to build a command arbitrary valid for every case. That is
+    // what makes it possible to build `commands` here, once, as a plain arbitrary rather than
+    // through `fc.gen()`: every case below gets its own real book, and a generated command
+    // resolves its account *indices* against that case's own accounts inside `run()`.
+    const shape = accountsOf(await seedBookIn(pool));
+    const commands = ledgerCommands(shape, tally);
+
     await fc.assert(
-      fc.asyncProperty(fc.gen(), async (gen) => {
+      fc.asyncProperty(commands, async (commands) => {
         const book = await createPropertyBook(pool);
         const real: Real = {
           bookId: book.bookId,
@@ -42,14 +54,12 @@ describe('arbitrary sequences of valid entries', () => {
           unitOfWork: book.unitOfWork,
         };
 
-        const commands = gen(ledgerCommands, book.accounts, tally);
-
         // `book.newModel()`, never `new LedgerModel(book.accounts)`: the fixture already posted
         // the opening entries, so a model that started empty would be off by exactly the opening
         // balance on every guarded account.
         await fc.asyncModelRun(() => ({ model: book.newModel(), real }), commands);
       }),
-      { numRuns: propertyRuns() },
+      { numRuns: propertyRuns(), examples: LEDGER_COMMAND_EXAMPLES },
     );
 
     expect(tally.accepted, 'no entry was ever accepted').toBeGreaterThan(0);
