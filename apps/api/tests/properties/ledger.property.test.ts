@@ -2,7 +2,7 @@ import fc from 'fast-check';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { accountsOf, seedBookIn } from '../helpers/ledger.js';
-import { ledgerCommands, type Real, type Tally } from './commands.js';
+import { assertInvariants, ledgerCommands, type Real, type Tally } from './commands.js';
 import { createPropertyBook } from './fixture.js';
 import { LEDGER_COMMAND_EXAMPLES } from './regressions.js';
 import { propertyRuns } from './runs.js';
@@ -57,7 +57,18 @@ describe('arbitrary sequences of valid entries', () => {
         // `book.newModel()`, never `new LedgerModel(book.accounts)`: the fixture already posted
         // the opening entries, so a model that started empty would be off by exactly the opening
         // balance on every guarded account.
-        await fc.asyncModelRun(() => ({ model: book.newModel(), real }), commands);
+        const model = book.newModel();
+        await fc.asyncModelRun(() => ({ model, real }), commands);
+
+        // Once at the end, whatever the sequence turned out to be.
+        //
+        // The write commands run the sweep themselves, so for most cases this repeats a check
+        // that just passed. It is here for the cases where it does not: `check()` returns true
+        // unconditionally for both read commands, so a short sequence can be drawn entirely
+        // from them, and then no write command ever ran and invariants 1 and 4 were never put
+        // to the database at all. One sweep per case closes that at a cost the per-read saving
+        // already paid for several times over.
+        await assertInvariants(model, real);
       }),
       { numRuns: propertyRuns(), examples: LEDGER_COMMAND_EXAMPLES },
     );
