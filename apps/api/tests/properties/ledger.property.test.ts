@@ -1,0 +1,93 @@
+import fc from 'fast-check';
+import { Pool } from 'pg';
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { accountsOf, seedBookIn } from '../helpers/ledger.js';
+import { assertInvariants, ledgerCommands, type Real, type Tally } from './commands.js';
+import { createPropertyBook } from './fixture.js';
+import { LEDGER_COMMAND_EXAMPLES } from './regressions.js';
+import { propertyRuns } from './runs.js';
+
+/**
+ * The ledger's invariants over generated command sequences.
+ *
+ * Against the real database, because the invariants this project is about are enforced half in
+ * TypeScript and half in migrations 0003 and 0007. A property run against a reimplementation
+ * would prove the reimplementation correct and say nothing about the triggers, the deferred
+ * constraint or the prefix rule's window function.
+ */
+
+let pool: Pool;
+
+beforeAll(() => {
+  pool = new Pool({ connectionString: inject('appUrl'), max: 10 });
+});
+
+afterAll(async () => {
+  await pool.end();
+});
+
+describe('arbitrary sequences of valid entries', () => {
+  it('hold every invariant after every command', async () => {
+    // Accumulated across the whole run rather than per case, and asserted afterwards. Because
+    // the model never predicts a refusal, a service that refused *everything* would satisfy
+    // every state invariant above - vacuous truth is the standing failure mode of property
+    // testing, and this is the guard against it. It also catches a generator that has drifted
+    // into producing entries nothing will accept, which is the same failure and likelier.
+    const tally: Tally = { accepted: 0, refused: 0, reversalsAccepted: 0, reversalsRefused: 0 };
+
+    // A book seeded once, purely to learn the fixture's account shape - count, order, currency
+    // - and thrown away without a single entry posted against it. `ledgerCommands` only reads
+    // that shape (`entrySpec` groups by currency; see `arbitraries.ts`), never an id from it, so
+    // one throwaway book is enough to build a command arbitrary valid for every case. That is
+    // what makes it possible to build `commands` here, once, as a plain arbitrary rather than
+    // through `fc.gen()`: every case below gets its own real book, and a generated command
+    // resolves its account *indices* against that case's own accounts inside `run()`.
+    const shape = accountsOf(await seedBookIn(pool));
+    const commands = ledgerCommands(shape, tally);
+
+    await fc.assert(
+      fc.asyncProperty(commands, async (commands) => {
+        const book = await createPropertyBook(pool);
+        const real: Real = {
+          bookId: book.bookId,
+          service: book.service,
+          unitOfWork: book.unitOfWork,
+        };
+
+        // `book.newModel()`, never `new LedgerModel(book.accounts)`: the fixture already posted
+        // the opening entries, so a model that started empty would be off by exactly the opening
+        // balance on every guarded account.
+        const model = book.newModel();
+        await fc.asyncModelRun(() => ({ model, real }), commands);
+
+        // Once at the end, whatever the sequence turned out to be.
+        //
+        // The write commands run the sweep themselves, so for most cases this repeats a check
+        // that just passed. It is here for the cases where it does not: `check()` returns true
+        // unconditionally for both read commands, so a short sequence can be drawn entirely
+        // from them, and then no write command ever ran and invariants 1 and 4 were never put
+        // to the database at all. One sweep per case closes that at a cost the per-read saving
+        // already paid for several times over.
+        await assertInvariants(model, real);
+      }),
+      { numRuns: propertyRuns(), examples: LEDGER_COMMAND_EXAMPLES },
+    );
+
+    expect(tally.accepted, 'no entry was ever accepted').toBeGreaterThan(0);
+    expect(tally.refused, 'no entry was ever refused: the overdraft rule went untested').toBeGreaterThan(0);
+    expect(
+      tally.accepted,
+      `only ${tally.accepted.toString()} of ${(tally.accepted + tally.refused).toString()} entries were accepted`,
+    ).toBeGreaterThan(tally.refused);
+
+    // Reversal coverage is asserted separately from the post-entry counters above, in its own
+    // counters, so a generator that happens to weight `ReverseEntryCommand` differently cannot
+    // trip - or silently stop testing - the post-entry guard. Only the accepted branch is
+    // asserted here: measured over ten runs at the default `numRuns` (25), reversalsAccepted
+    // never fell below 14, but reversalsRefused was 0 in one of the ten. Asserting it greater
+    // than zero would reintroduce exactly the flakiness this fix exists to remove, so the
+    // refusal branch (the `AccountOverdrawnError` catch in `ReverseEntryCommand.run`, which
+    // increments `reversalsRefused`) is exercised without being required to occur in every run.
+    expect(tally.reversalsAccepted, 'no reversal was ever accepted').toBeGreaterThan(0);
+  });
+});
