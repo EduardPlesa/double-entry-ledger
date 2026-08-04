@@ -4,6 +4,7 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { createTestApplication, type TestApplication } from '../helpers/app.js';
 import { bearer, createAccount, createBook, registerUser } from '../helpers/books.js';
+import { HTTP_AMOUNT_EXAMPLES } from './regressions.js';
 import { propertyRuns } from './runs.js';
 
 /**
@@ -77,7 +78,8 @@ describe('an amount across the HTTP boundary', () => {
         expect(balance.body.balance).toBe(formatMoney(money(expectedMinor, 'EUR')));
         expect(balance.body.currency).toBe('EUR');
       }),
-      { numRuns: propertyRuns(15) },
+      // The corpus replays before anything is generated. Empty today, and free until it is not.
+      { numRuns: propertyRuns(15), examples: HTTP_AMOUNT_EXAMPLES },
     );
   });
 });
