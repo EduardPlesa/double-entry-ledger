@@ -1,5 +1,6 @@
 import { formatMoney, money } from '@ledger/shared';
 import type { Pool } from 'pg';
+import { DrizzleUnitOfWork, createDatabase, type UnitOfWork } from '../../src/db/client.js';
 import { isGuardedAccountType } from '../../src/domain/overdraft.js';
 import type { AccountRecord, EntryRecord } from '../../src/repositories/ledger.repository.js';
 import type { LedgerService } from '../../src/services/ledger.service.js';
@@ -48,6 +49,11 @@ export interface PropertyBook {
   readonly accounts: readonly AccountRecord[];
   readonly service: LedgerService;
   /**
+   * Read-only here: the prefix cross-check in `prefix.ts` needs a book-scoped transaction to
+   * reach `lowestPrefixBalance`, and nothing else uses it.
+   */
+  readonly unitOfWork: UnitOfWork;
+  /**
    * A fresh {@link LedgerModel}, pre-loaded with the opening entries this fixture already
    * posted through the real service.
    *
@@ -67,6 +73,9 @@ export interface PropertyBook {
 
 export async function createPropertyBook(pool: Pool): Promise<PropertyBook> {
   const { service } = createService(pool);
+  // The same shape `createService` builds internally. Read-only here: the cross-check needs a
+  // book-scoped transaction to reach `lowestPrefixBalance`, and nothing else uses it.
+  const unitOfWork = new DrizzleUnitOfWork(createDatabase(pool));
   const book = await seedBookIn(pool);
   const records = accountsOf(book);
   const openingEntries: EntryRecord[] = [];
@@ -106,6 +115,7 @@ export async function createPropertyBook(pool: Pool): Promise<PropertyBook> {
     bookId: book.bookId,
     accounts: records,
     service,
+    unitOfWork,
     newModel(): LedgerModel {
       const model = new LedgerModel(records);
       for (const entry of openingEntries) {
