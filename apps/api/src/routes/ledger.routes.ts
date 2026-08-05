@@ -44,7 +44,7 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
 
   const postEntry: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
-    const { entry, created } = await ledger.postEntry(
+    const { entry, created, reversedBy } = await ledger.postEntry(
       bookId,
       request.body,
       authorshipOf(principalOf(response)),
@@ -57,10 +57,15 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
     // 201 for a create, 200 for a replay of one that already existed under the same
     // external_id. Both return the same entry, which is what makes a retry after a timeout
     // safe - and the status is how a caller can tell which happened without comparing bodies.
+    //
+    // `reversedBy` is asserted `null` on the create branch rather than threaded through: the
+    // service never looks it up there because nothing can have reversed an entry this call
+    // just inserted. On a replay the entry was recorded earlier and may since have been
+    // reversed, so the service's answer is passed through unchanged.
     response
       .status(created ? 201 : 200)
       .location(`/entries/${entry.id}`)
-      .json(serializeEntry(entry));
+      .json(serializeEntry(entry, created ? null : reversedBy));
   };
 
   const getBalance: RequestHandler = async (request, response) => {
@@ -105,7 +110,10 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
 
     // 201: a reversal is a new entry with its own id and its own URL, not a modification of
     // the one it corrects. That is the whole shape of the domain in one status code.
-    response.status(201).location(`/entries/${reversal.id}`).json(serializeEntry(reversal));
+    //
+    // `reversedBy` is `null` as a fact, not a placeholder: this entry was inserted a moment
+    // ago by this same request, so it cannot itself already have a reversal.
+    response.status(201).location(`/entries/${reversal.id}`).json(serializeEntry(reversal, null));
   };
 
   const getEntry: RequestHandler = async (request, response) => {

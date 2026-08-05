@@ -91,6 +91,15 @@ export interface PostEntryResult {
    * retry after a timeout safe.
    */
   readonly created: boolean;
+  /**
+   * The reversal of `entry`, if one exists. Always `null` when `created` is true - an entry
+   * this call just inserted cannot already have been reversed, so that branch never looks it
+   * up. Populated from `findReversalOf` when `created` is false, because the entry being
+   * handed back was recorded earlier and may since have been reversed; reporting `null`
+   * unconditionally there would tell a client a reversal is safe when it can only fail with
+   * `ENTRY_ALREADY_REVERSED`.
+   */
+  readonly reversedBy: string | null;
 }
 
 export interface BalanceResult {
@@ -234,7 +243,13 @@ export class LedgerService {
         // beforehand also narrows the window the race below has to lose.
         if (externalId !== null) {
           const existing = await this.repository.findEntryByExternalId(tx, bookId, externalId);
-          if (existing !== null) return { entry: existing, created: false };
+          if (existing !== null) {
+            // A replay: this entry was recorded on an earlier call and may since have been
+            // reversed. One more index lookup, in the same transaction, is what keeps that
+            // fact truthful in the response - see the note on `reversedBy`.
+            const reversal = await this.repository.findReversalOf(tx, existing.id);
+            return { entry: existing, created: false, reversedBy: reversal?.id ?? null };
+          }
         }
 
         const accounts = await this.assertPostable(tx, bookId, legs);
@@ -261,7 +276,8 @@ export class LedgerService {
 
         await this.assertNoOverdraft(tx, postedLegs, accounts);
 
-        return { entry, created: true };
+        // Just inserted: nothing can have reversed it yet.
+        return { entry, created: true, reversedBy: null };
       });
     } catch (error) {
       // Two callers posted the same external_id at once and this one lost. The winner's
@@ -276,10 +292,19 @@ export class LedgerService {
       // from. It is book-scoped like the first: the policy does not care that this read is
       // recovering from an error.
       if (externalId !== null && isUniqueViolationOn(error, EXTERNAL_ID_INDEX)) {
-        const existing = await this.unitOfWork.transactionInBook(bookId, (tx) =>
-          this.repository.findEntryByExternalId(tx, bookId, externalId),
-        );
-        if (existing !== null) return { entry: existing, created: false };
+        const existing = await this.unitOfWork.transactionInBook(bookId, async (tx) => {
+          const entry = await this.repository.findEntryByExternalId(tx, bookId, externalId);
+          if (entry === null) return null;
+
+          // Same reasoning as the ordinary replay branch above: the entry this recovers to
+          // was recorded by whoever won the race, and reporting it unreversed would be a
+          // guess, not a fact.
+          const reversal = await this.repository.findReversalOf(tx, entry.id);
+          return { entry, reversedBy: reversal?.id ?? null };
+        });
+        if (existing !== null) {
+          return { entry: existing.entry, created: false, reversedBy: existing.reversedBy };
+        }
       }
 
       throw translateWriteFailure(error);
