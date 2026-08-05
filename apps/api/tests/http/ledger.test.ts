@@ -273,6 +273,56 @@ describe('GET /accounts/:accountId/balance', () => {
   });
 });
 
+describe('GET /books/:bookId/accounts', () => {
+  it('lists the book\'s accounts with their parent and closed state', async () => {
+    const response = await api()
+      .get(`/books/${book.bookId}/accounts`)
+      .set('Authorization', auth());
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: cash,
+          name: 'Cash',
+          type: 'asset',
+          currency: 'EUR',
+          parentId: null,
+          closedAt: null,
+        }),
+      ]),
+    );
+  });
+
+  it('reports a child account\'s parent', async () => {
+    const child = await createAccount(application, book, {
+      name: 'Petty cash',
+      type: 'asset',
+      parentId: cash,
+    });
+
+    const response = await api()
+      .get(`/books/${book.bookId}/accounts`)
+      .set('Authorization', auth());
+
+    const found = response.body.find((account: { id: string }) => account.id === child);
+    expect(found.parentId).toBe(cash);
+  });
+
+  it('refuses a caller with no membership in the book', async () => {
+    // 404, not 403: the same anti-enumeration answer every other `bookFrom: 'param'` route
+    // gives a non-member, so that membership cannot be probed with an id and a stopwatch. See
+    // `tests/http/authorization.test.ts`, "a caller who is not a member".
+    const stranger = await registerUser(application);
+    const response = await api()
+      .get(`/books/${book.bookId}/accounts`)
+      .set('Authorization', bearer(stranger.accessToken));
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('BOOK_NOT_FOUND');
+  });
+});
+
 describe('GET /accounts/:accountId/postings', () => {
   let pagedAccount: string;
 

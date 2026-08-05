@@ -1,15 +1,16 @@
 import {
   formatMoney,
   type Money,
+  type AccountResource,
   type BalanceResource,
   type EntryResource,
   type PostingPageResource,
   type TrialBalanceResource,
 } from '@ledger/shared';
-import type { EntryRecord } from '../repositories/ledger.repository.js';
+import type { AccountRecord, EntryRecord } from '../repositories/ledger.repository.js';
 import type { BalanceResult, PostingPage, TrialBalanceResult } from '../services/ledger.service.js';
 
-export type { BalanceResource, EntryResource, PostingPageResource, TrialBalanceResource };
+export type { AccountResource, BalanceResource, EntryResource, PostingPageResource, TrialBalanceResource };
 
 /**
  * Domain values into JSON.
@@ -32,6 +33,18 @@ export type { BalanceResource, EntryResource, PostingPageResource, TrialBalanceR
 
 function amount(value: Money): string {
   return formatMoney(value);
+}
+
+export function serializeAccount(account: AccountRecord): AccountResource {
+  return {
+    id: account.id,
+    bookId: account.bookId,
+    name: account.name,
+    type: account.type,
+    currency: account.currency,
+    parentId: account.parentId,
+    closedAt: account.closedAt?.toISOString() ?? null,
+  };
 }
 
 export function serializeEntry(entry: EntryRecord, reversedBy: string | null = null): EntryResource {
