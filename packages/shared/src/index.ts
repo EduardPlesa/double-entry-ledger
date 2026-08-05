@@ -20,3 +20,18 @@ export {
   isNegativeMoney,
 } from './money.js';
 export { type Clock, type TestClock, systemClock, fixedClock, testClock } from './clock.js';
+export {
+  credentials,
+  createBookInput,
+  createAccountInput,
+  postEntryInput,
+  reverseEntryInput,
+  paginationQuery,
+  listPostingsInput,
+  type CredentialsInput,
+  type CreateBookInput,
+  type CreateAccountInput,
+  type PostEntryInput,
+  type ReverseEntryInput,
+  type ListPostingsOptions,
+} from './contracts/requests.js';
