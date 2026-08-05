@@ -181,6 +181,19 @@ export class LedgerService {
   }
 
   /**
+   * Every account in a book, in one query.
+   *
+   * `transactionInBook` because `accounts` is behind the row-level security policy from
+   * migration `0006`, so the book id has to be set on the connection before the policy will
+   * return anything at all - the `WHERE` clause below it is belt as well as braces.
+   */
+  async listAccounts(bookId: string): Promise<AccountRecord[]> {
+    return this.unitOfWork.transactionInBook(bookId, (tx) =>
+      this.repository.listAccountsByBook(tx, bookId),
+    );
+  }
+
+  /**
    * Records an entry, or returns the one already recorded under the same `externalId`.
    *
    * The order of operations is the design:

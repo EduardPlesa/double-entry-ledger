@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express';
 import { authorshipOf, bookAccessOf, principalOf } from '../http/context.js';
 import { recordIdempotentEntry } from '../middleware/idempotency.js';
 import {
+  serializeAccount,
   serializeBalance,
   serializeEntry,
   serializePostingPage,
@@ -31,17 +32,14 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
     const { bookId } = bookAccessOf(response);
     const account = await ledger.createAccount(bookId, request.body);
 
-    response
-      .status(201)
-      .location(`/accounts/${account.id}`)
-      .json({
-        id: account.id,
-        bookId: account.bookId,
-        name: account.name,
-        type: account.type,
-        currency: account.currency,
-        closedAt: account.closedAt?.toISOString() ?? null,
-      });
+    response.status(201).location(`/accounts/${account.id}`).json(serializeAccount(account));
+  };
+
+  const listAccounts: RequestHandler = async (_request, response) => {
+    const { bookId } = bookAccessOf(response);
+    const accounts = await ledger.listAccounts(bookId);
+
+    response.json(accounts.map(serializeAccount));
   };
 
   const postEntry: RequestHandler = async (request, response) => {
@@ -126,6 +124,13 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       access: { kind: 'book', permission: 'account:create', bookFrom: 'param' },
       summary: 'Create an account in a book',
       handler: createAccount,
+    },
+    {
+      method: 'get',
+      path: '/books/:bookId/accounts',
+      access: { kind: 'book', permission: 'book:read', bookFrom: 'param' },
+      summary: 'List the accounts of a book',
+      handler: listAccounts,
     },
     {
       method: 'post',
