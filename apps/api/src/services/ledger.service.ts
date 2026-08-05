@@ -1,4 +1,17 @@
-import { type Clock, type Money, money, parseMoney } from '@ledger/shared';
+import {
+  createAccountInput as createAccountSchema,
+  listPostingsInput as listPostingsOptionsSchema,
+  postEntryInput as postEntryInputSchema,
+  reverseEntryInput as reverseEntryInputSchema,
+  type Clock,
+  type CreateAccountInput,
+  type ListPostingsOptions,
+  type Money,
+  type PostEntryInput,
+  type ReverseEntryInput,
+  money,
+  parseMoney,
+} from '@ledger/shared';
 import { z } from 'zod';
 import type { Executor, UnitOfWork } from '../db/client.js';
 import { SQLSTATE, hasSqlState, isUniqueViolationOn } from '../db/pg-errors.js';
@@ -35,79 +48,7 @@ import { decodePostingCursor, encodePostingCursor } from './cursor.js';
 /** The index of the unique index behind `(book_id, external_id)`. Named so the race below can spot it. */
 const EXTERNAL_ID_INDEX = 'entries_book_id_external_id_key';
 
-const CURRENCY_RE = /^[A-Z]{3}$/;
-
-/**
- * Amounts cross this boundary as decimal strings - `"12.34"`, not `1234` and not `12.34` as
- * a JSON number - and are minor-unit bigints from here inward.
- *
- * Strings because JSON numbers are IEEE 754 doubles, and a ledger that can hold a value it
- * cannot round-trip through its own API is not one you would put money in. Decimal rather
- * than minor units because the caller then does not have to know that JPY has no minor unit
- * and KWD has three; that table lives in one place, in `packages/shared`, and both sides
- * import it. The tradeoff is one parse per leg and a stricter grammar - no `1e3`, no
- * thousands separators, never more decimal places than the currency has - which is
- * `parseMoney`'s job and is tested there.
- *
- * These schemas move to `packages/shared` in stage 3, when the frontend needs to import
- * them; they start here because nothing outside the service has an opinion about them yet.
- */
-const legInputSchema = z.object({
-  accountId: z.uuid('must be a UUID'),
-  amount: z.string(),
-  currency: z.string().regex(CURRENCY_RE, 'must be a three-letter ISO 4217 code, such as EUR'),
-});
-
-const postEntryInputSchema = z.object({
-  /** When it happened in the world. Asserted by the caller; never read from the clock. */
-  occurredAt: z.coerce.date(),
-  description: z.string().trim().min(1, 'must not be blank').max(1000),
-  /**
-   * Caller-supplied idempotency key. Unique per book, and the reason posting the same entry
-   * twice is safe.
-   */
-  externalId: z.string().trim().min(1, 'must not be blank').max(255).nullish(),
-  /**
-   * Two legs minimum. A single-leg entry cannot sum to zero unless the leg is zero, and a
-   * zero leg is rejected as well - so the alternative to this bound is a worse error message
-   * later, never an accepted entry.
-   */
-  legs: z.array(legInputSchema).min(2, 'an entry needs at least two legs').max(1000),
-});
-
-export type PostEntryInput = z.input<typeof postEntryInputSchema>;
-
-const listPostingsOptionsSchema = z.object({
-  cursor: z.string().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-});
-
-export type ListPostingsOptions = z.input<typeof listPostingsOptionsSchema>;
-
-/**
- * The five account types of double-entry bookkeeping, matching the Postgres enum. Fixed by
- * accounting rather than by product requirements - there will never be a sixth.
- */
-const createAccountSchema = z.object({
-  name: z.string().trim().min(1, 'must not be blank').max(200),
-  type: z.enum(['asset', 'liability', 'equity', 'revenue', 'expense']),
-  currency: z.string().regex(CURRENCY_RE, 'must be a three-letter ISO 4217 code, such as EUR'),
-  parentId: z.uuid('must be a UUID').nullish(),
-});
-
-export type CreateAccountInput = z.input<typeof createAccountSchema>;
-
-/**
- * Everything about a reversal is optional. The legs are determined by the original - that is
- * what makes it a reversal rather than a new entry that happens to look like one.
- */
-const reverseEntryInputSchema = z.object({
-  occurredAt: z.coerce.date().optional(),
-  description: z.string().trim().min(1, 'must not be blank').max(1000).optional(),
-  externalId: z.string().trim().min(1, 'must not be blank').max(255).nullish(),
-});
-
-export type ReverseEntryInput = z.input<typeof reverseEntryInputSchema>;
+export type { CreateAccountInput, ListPostingsOptions, PostEntryInput, ReverseEntryInput };
 
 /**
  * Who recorded an entry. Exactly one is set for anything written through the API; both are
