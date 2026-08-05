@@ -43,6 +43,10 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       });
   };
 
+  const listBooks: RequestHandler = async (_request, response) => {
+    response.json(await books.listBooks(principalOf(response)));
+  };
+
   const addMember: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
     const { membership, user } = await books.grantRole(bookId, request.body);
@@ -86,6 +90,13 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       access: { kind: 'authenticated' },
       summary: 'Create a book, owned by the caller',
       handler: createBook,
+    },
+    {
+      method: 'get',
+      path: '/books',
+      access: { kind: 'authenticated' },
+      summary: 'List the books this caller can reach',
+      handler: listBooks,
     },
     {
       method: 'post',
