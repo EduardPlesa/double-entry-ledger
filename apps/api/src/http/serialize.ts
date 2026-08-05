@@ -47,7 +47,7 @@ export function serializeAccount(account: AccountRecord): AccountResource {
   };
 }
 
-export function serializeEntry(entry: EntryRecord, reversedBy: string | null = null): EntryResource {
+export function serializeEntry(entry: EntryRecord, reversedBy: string | null): EntryResource {
   return {
     id: entry.id,
     bookId: entry.bookId,
