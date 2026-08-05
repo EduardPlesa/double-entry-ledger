@@ -1,3 +1,4 @@
+import type { AccountType } from './requests.js';
 import type { BookRole } from './roles.js';
 
 /**
@@ -31,7 +32,7 @@ export interface AccountResource {
   readonly id: string;
   readonly bookId: string;
   readonly name: string;
-  readonly type: string;
+  readonly type: AccountType;
   readonly currency: string;
   /** Null for a root account. The tree the frontend draws is built from this column. */
   readonly parentId: string | null;
@@ -73,7 +74,7 @@ export interface TrialBalanceResource {
   readonly accounts: readonly {
     readonly accountId: string;
     readonly name: string;
-    readonly type: string;
+    readonly type: AccountType;
     readonly currency: string;
     readonly balance: string;
   }[];
