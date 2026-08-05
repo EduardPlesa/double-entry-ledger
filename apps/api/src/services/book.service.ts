@@ -1,4 +1,4 @@
-import type { Clock } from '@ledger/shared';
+import { createBookInput as createBookSchema, type Clock, type CreateBookInput } from '@ledger/shared';
 import { z } from 'zod';
 import { generateApiKey } from '../auth/tokens.js';
 import type { ApiKeyEnvironment } from '../config.js';
@@ -19,14 +19,7 @@ import type { ApiKeyRecord, MembershipRepository } from '../repositories/members
  * writes go in one transaction, and the service that spans them is the right place for it.
  */
 
-const createBookSchema = z.object({
-  name: z.string().trim().min(1, 'must not be blank').max(200),
-  baseCurrency: z
-    .string()
-    .regex(/^[A-Z]{3}$/, 'must be a three-letter ISO 4217 code, such as EUR'),
-});
-
-export type CreateBookInput = z.input<typeof createBookSchema>;
+export type { CreateBookInput };
 
 const grantRoleSchema = z.object({
   /**
