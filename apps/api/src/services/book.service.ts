@@ -184,7 +184,12 @@ export class BookService {
   }
 }
 
-function toBookResource(record: BookMembershipRecord): BookResource {
+/**
+ * A `BookRecord` plus the caller's role in it, shaped into the resource every read of a book
+ * returns - including the one `POST /books` hands back for the book it just created, whose
+ * creator is always its owner.
+ */
+export function toBookResource(record: BookMembershipRecord): BookResource {
   return {
     id: record.id,
     name: record.name,
