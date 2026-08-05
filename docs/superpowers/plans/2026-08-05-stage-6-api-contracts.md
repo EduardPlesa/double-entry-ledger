@@ -1008,8 +1008,12 @@ describe('GET /books/:bookId/accounts', () => {
       .get(`/books/${book.bookId}/accounts`)
       .set('Authorization', bearer(stranger.accessToken));
 
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe('FORBIDDEN');
+    // 404, not 403: `authorize()` answers a non-member with BookNotFoundError so the status
+    // code cannot be used to probe whether a book id is real. 403 is reserved for a member
+    // whose role is too weak. `tests/http/authorization.test.ts` already pins this for the
+    // sibling POST route.
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('BOOK_NOT_FOUND');
   });
 });
 ```
