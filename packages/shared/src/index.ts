@@ -35,3 +35,12 @@ export {
   type ReverseEntryInput,
   type ListPostingsOptions,
 } from './contracts/requests.js';
+export { BOOK_ROLES, type BookRole } from './contracts/roles.js';
+export type {
+  BookResource,
+  AccountResource,
+  EntryResource,
+  BalanceResource,
+  TrialBalanceResource,
+  PostingPageResource,
+} from './contracts/responses.js';

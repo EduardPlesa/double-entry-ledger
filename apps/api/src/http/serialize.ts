@@ -1,6 +1,15 @@
-import { formatMoney, type Money } from '@ledger/shared';
+import {
+  formatMoney,
+  type Money,
+  type BalanceResource,
+  type EntryResource,
+  type PostingPageResource,
+  type TrialBalanceResource,
+} from '@ledger/shared';
 import type { EntryRecord } from '../repositories/ledger.repository.js';
 import type { BalanceResult, PostingPage, TrialBalanceResult } from '../services/ledger.service.js';
+
+export type { BalanceResource, EntryResource, PostingPageResource, TrialBalanceResource };
 
 /**
  * Domain values into JSON.
@@ -25,23 +34,7 @@ function amount(value: Money): string {
   return formatMoney(value);
 }
 
-export interface EntryResource {
-  readonly id: string;
-  readonly bookId: string;
-  readonly occurredAt: string;
-  readonly recordedAt: string;
-  readonly description: string;
-  readonly externalId: string | null;
-  readonly reversalOf: string | null;
-  readonly postings: readonly {
-    readonly id: string;
-    readonly accountId: string;
-    readonly amount: string;
-    readonly currency: string;
-  }[];
-}
-
-export function serializeEntry(entry: EntryRecord): EntryResource {
+export function serializeEntry(entry: EntryRecord, reversedBy: string | null = null): EntryResource {
   return {
     id: entry.id,
     bookId: entry.bookId,
@@ -50,6 +43,7 @@ export function serializeEntry(entry: EntryRecord): EntryResource {
     description: entry.description,
     externalId: entry.externalId,
     reversalOf: entry.reversalOf,
+    reversedBy,
     postings: entry.postings.map((posting) => ({
       id: posting.id.toString(),
       accountId: posting.accountId,
@@ -63,13 +57,6 @@ export function serializeEntry(entry: EntryRecord): EntryResource {
   };
 }
 
-export interface BalanceResource {
-  readonly accountId: string;
-  readonly asOf: string | null;
-  readonly balance: string;
-  readonly currency: string;
-}
-
 export function serializeBalance(result: BalanceResult): BalanceResource {
   return {
     accountId: result.accountId,
@@ -77,25 +64,6 @@ export function serializeBalance(result: BalanceResult): BalanceResource {
     balance: amount(result.balance),
     currency: result.balance.currency,
   };
-}
-
-export interface TrialBalanceResource {
-  readonly bookId: string;
-  readonly asOf: string | null;
-  readonly accounts: readonly {
-    readonly accountId: string;
-    readonly name: string;
-    readonly type: string;
-    readonly currency: string;
-    readonly balance: string;
-  }[];
-  readonly totals: readonly {
-    readonly currency: string;
-    readonly debits: string;
-    readonly credits: string;
-    readonly balanced: boolean;
-  }[];
-  readonly balanced: boolean;
 }
 
 /**
@@ -123,21 +91,6 @@ export function serializeTrialBalance(result: TrialBalanceResult): TrialBalanceR
     })),
     balanced: result.balanced,
   };
-}
-
-export interface PostingPageResource {
-  readonly accountId: string;
-  readonly items: readonly {
-    readonly id: string;
-    readonly entryId: string;
-    readonly occurredAt: string;
-    readonly recordedAt: string;
-    readonly description: string;
-    readonly amount: string;
-    readonly runningBalance: string;
-    readonly currency: string;
-  }[];
-  readonly nextCursor: string | null;
 }
 
 export function serializePostingPage(page: PostingPage): PostingPageResource {
