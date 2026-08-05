@@ -107,7 +107,7 @@ export function accountsOf(book: Book): AccountRecord[] {
     name: string,
     type: AccountRecord['type'],
     currency: string,
-  ): AccountRecord => ({ id, bookId: book.bookId, name, type, currency, closedAt: null });
+  ): AccountRecord => ({ id, bookId: book.bookId, name, type, currency, parentId: null, closedAt: null });
 
   return [
     record(book.cash, 'Cash', 'asset', 'EUR'),
