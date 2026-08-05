@@ -108,6 +108,15 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
     response.status(201).location(`/entries/${reversal.id}`).json(serializeEntry(reversal));
   };
 
+  const getEntry: RequestHandler = async (request, response) => {
+    const { bookId } = bookAccessOf(response);
+    const entryId = uuidPathParam(request.params, 'entryId');
+
+    const { entry, reversedBy } = await ledger.getEntry(bookId, entryId);
+
+    response.json(serializeEntry(entry, reversedBy));
+  };
+
   const trialBalance: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
 
@@ -159,6 +168,13 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       access: { kind: 'book', permission: 'entry:reverse', bookFrom: 'entry' },
       summary: 'Reverse an entry by recording its negation',
       handler: reverseEntry,
+    },
+    {
+      method: 'get',
+      path: '/entries/:entryId',
+      access: { kind: 'book', permission: 'book:read', bookFrom: 'entry' },
+      summary: 'Read one entry and the reversal that cancels it',
+      handler: getEntry,
     },
     {
       method: 'get',

@@ -388,6 +388,30 @@ export class LedgerService {
   }
 
   /**
+   * One entry, with the reversal that cancels it if there is one.
+   *
+   * Two queries in one transaction rather than a join: `findReversalOf` is an index lookup
+   * on a column that is null for almost every row, and joining it would repeat every entry
+   * column once per leg for the sake of one nullable id.
+   *
+   * `reversedBy` is what lets the reversal screen disable an action whose only possible
+   * outcome is `ENTRY_ALREADY_REVERSED`. The entry itself carries `reversalOf`, the link in
+   * the other direction, and neither can be derived from the other in one direction of read.
+   */
+  async getEntry(
+    bookId: string,
+    entryId: string,
+  ): Promise<{ entry: EntryRecord; reversedBy: string | null }> {
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const entry = await this.repository.findEntryById(tx, entryId);
+      if (entry === null) throw new EntryNotFoundError(entryId);
+
+      const reversal = await this.repository.findReversalOf(tx, entryId);
+      return { entry, reversedBy: reversal?.id ?? null };
+    });
+  }
+
+  /**
    * The trial balance: every account with its balance, and the proof that the book adds up.
    *
    * The totals are per currency, not per book. A book's `base_currency` is a default for
