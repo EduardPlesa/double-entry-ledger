@@ -1,7 +1,14 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestApplication, type TestApplication } from '../helpers/app.js';
-import { bearer, createBook, registerUser, type TestBook, type TestUser } from '../helpers/books.js';
+import {
+  bearer,
+  createBook,
+  issueApiKey,
+  registerUser,
+  type TestBook,
+  type TestUser,
+} from '../helpers/books.js';
 
 /**
  * Books over HTTP, and the one question that has to be answerable before any book is known:
@@ -50,5 +57,20 @@ describe('GET /books', () => {
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('UNAUTHENTICATED');
+  });
+
+  it('scopes an API key to the one book it was issued for, with the role it was issued', async () => {
+    const key = await issueApiKey(application, book, 'accountant');
+    const otherBook = await createBook(application, await registerUser(application));
+
+    const response = await api().get('/books').set('Authorization', bearer(key));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([
+      expect.objectContaining({ id: book.bookId, role: 'accountant', baseCurrency: 'EUR' }),
+    ]);
+    expect(response.body).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: otherBook.bookId })]),
+    );
   });
 });
