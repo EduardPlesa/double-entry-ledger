@@ -156,6 +156,14 @@ duplicate or a conflict. The race between two concurrent posts of one `external_
 resolved by the unique index and recovered from by re-reading the winner's row; a test fires
 three at once.
 
+The request schemas that validate `postEntry` and its neighbours, and the response types that
+`apps/api/src/http/serialize.ts` produces from them, now live in `packages/shared` rather than
+in this service. Stage 6's frontend gates its submit button on the same zero-sum rule this
+service enforces, and it needs to ask that question before a request round-trips to the
+server. Two copies of that rule, one in each app, would eventually disagree — and the
+direction they'd disagree in is the frontend offering a button whose submission the service
+was always going to reject.
+
 ## Money, and the boundary
 
 Amounts are `bigint` minor units everywhere inside the system. They cross the service

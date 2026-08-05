@@ -398,3 +398,54 @@ describe('GET /books/:bookId/trial-balance', () => {
     expect(response.body.totals[0].debits).toBe('10.00');
   });
 });
+
+describe('GET /entries/:entryId', () => {
+  it('returns the entry with its legs, and null for reversedBy while it stands', async () => {
+    const fixture = await freshBook();
+    const posted = await post(fixture, '10.00');
+
+    const response = await api().get(`/entries/${posted.body.id}`).set('Authorization', auth());
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ id: posted.body.id, reversalOf: null, reversedBy: null });
+    expect(response.body.postings).toHaveLength(2);
+  });
+
+  it('names the reversal once one exists', async () => {
+    const fixture = await freshBook();
+    const posted = await post(fixture, '10.00');
+
+    const reversal = await api()
+      .post(`/entries/${posted.body.id}/reverse`)
+      .set('Authorization', auth())
+      .send({});
+
+    const response = await api().get(`/entries/${posted.body.id}`).set('Authorization', auth());
+
+    expect(response.body.reversedBy).toBe(reversal.body.id);
+  });
+
+  it('says the reversal itself reverses the original and is not reversed', async () => {
+    const fixture = await freshBook();
+    const posted = await post(fixture, '10.00');
+
+    const reversal = await api()
+      .post(`/entries/${posted.body.id}/reverse`)
+      .set('Authorization', auth())
+      .send({});
+
+    const response = await api()
+      .get(`/entries/${reversal.body.id}`)
+      .set('Authorization', auth());
+
+    expect(response.body).toMatchObject({ reversalOf: posted.body.id, reversedBy: null });
+  });
+
+  it('answers 404 for an entry that does not exist', async () => {
+    const response = await api()
+      .get('/entries/3f4d0b7e-9a5e-4c3b-8a52-2c1f5c9a1b23')
+      .set('Authorization', auth());
+
+    expect(response.status).toBe(404);
+  });
+});
