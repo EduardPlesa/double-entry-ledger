@@ -31,6 +31,7 @@ export {
   type CredentialsInput,
   type CreateBookInput,
   type CreateAccountInput,
+  type AccountType,
   type PostEntryInput,
   type ReverseEntryInput,
   type ListPostingsOptions,
