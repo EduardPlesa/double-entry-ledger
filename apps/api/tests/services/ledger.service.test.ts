@@ -15,6 +15,7 @@ import { seedBookIn, withBookClient, type Book } from '../helpers/ledger.js';
 import {
   START,
   createService,
+  createServiceBlindToItsFirstReplayRead,
   createServiceWithFailingTransaction,
   createServiceWithoutDatabase,
   type ServiceHarness,
@@ -425,6 +426,41 @@ describe('postEntry, idempotency', () => {
     expect(ids.size).toBe(1);
     expect(results.filter((result) => result.created)).toHaveLength(1);
     expect(await countEntries(target.bookId)).toBe(1);
+  });
+
+  it('reports the reversal on the entry a lost race recovers to', async () => {
+    // The recovery above, for an entry that has since been reversed. It answers from a second
+    // transaction of its own rather than from the one that raised, so `reversedBy` there is a
+    // separate lookup from the one the replay branch does - and a separate chance to report a
+    // `null` that stopped being true. A client retrying a reversed entry is told it is
+    // reversed no matter which of the two paths answers.
+    //
+    // Each racer holds a service blind to its first idempotency read, because that is what
+    // losing this race is: reading `entries` and finding nothing. With the winner's row
+    // committed before they start - which is what makes the reversal possible at all - every
+    // one of them would otherwise return through the replay branch and never reach the
+    // recovery.
+    const target = await freshBook();
+    const externalId = `invoice-${newId()}`;
+
+    const original = await service.postEntry(target.bookId, sale({ externalId }, target));
+    const reversal = await service.reverseEntry(target.bookId, original.entry.id);
+    expect(original.reversedBy).toBeNull();
+
+    const losers = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        createServiceBlindToItsFirstReplayRead(pool).postEntry(target.bookId, sale({ externalId }, target)),
+      ),
+    );
+
+    for (const loser of losers) {
+      expect(loser.created).toBe(false);
+      expect(loser.entry.id).toBe(original.entry.id);
+      expect(loser.reversedBy).toBe(reversal.id);
+    }
+
+    // The original and its reversal, and nothing the losers wrote.
+    expect(await countEntries(target.bookId)).toBe(2);
   });
 
   it('scopes external_id to the book, so two books may use the same one', async () => {
