@@ -311,6 +311,63 @@ describe('a refusal that depends on the state of the ledger', () => {
   });
 });
 
+describe('a replayed body describing state that has since moved on', () => {
+  /**
+   * `reversedBy` is the first field in a cached body that can stop being true, and this pins
+   * what happens when it does.
+   *
+   * The stored response is not re-serialised on the way out, so a replay reports the entry as
+   * unreversed however long ago it was reversed. That is deliberate and is the same contract as
+   * every other replay here: retrying an HTTP call returns that call's response, not a fresh
+   * reading of the ledger. It is also the opposite of what the `external_id` replay does, which
+   * runs the service and reports the reversal - so the two need a test each, or the difference
+   * between them is one nobody notices changing.
+   *
+   * Nothing is hidden by this. The entry resource asks the ledger and answers with the
+   * reversal, which is the assertion at the end.
+   */
+  it('reports the entry as unreversed, because a replay repeats a response and not a state', async () => {
+    const key = uniqueKey();
+    const entry = sale({ description: `reversed-after-the-fact-${key}` });
+
+    const created = await api()
+      .post(`/books/${book.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', key)
+      .send(entry);
+
+    expect(created.status).toBe(201);
+    expect(created.body.reversedBy).toBeNull();
+
+    await completed(key);
+
+    // A different request entirely, and one this key knows nothing about.
+    const reversal = await api()
+      .post(`/entries/${created.body.id}/reverse`)
+      .set('Authorization', auth())
+      .send({});
+
+    expect(reversal.status).toBe(201);
+
+    const replayed = await api()
+      .post(`/books/${book.bookId}/entries`)
+      .set('Authorization', auth())
+      .set('Idempotency-Key', key)
+      .send(entry);
+
+    expect(replayed.headers[REPLAYED_HEADER.toLowerCase()]).toBe('true');
+    expect(replayed.status).toBe(201);
+    expect(replayed.body).toEqual(created.body);
+    expect(replayed.body.reversedBy).toBeNull();
+
+    // The stale field is in the cached body, not in the system: the entry itself says so.
+    const fetched = await api().get(`/entries/${created.body.id}`).set('Authorization', auth());
+
+    expect(fetched.status).toBe(200);
+    expect(fetched.body.reversedBy).toBe(reversal.body.id);
+  });
+});
+
 describe('the same key for a different request', () => {
   it('is refused as a client bug rather than answered with the first response', async () => {
     // Replaying here would hand back the result of a request the caller did not make, which
