@@ -1,7 +1,7 @@
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import type { Executor } from '../db/client.js';
 import type { BookRole } from '../domain/policy.js';
-import { apiKeys, bookMembers } from '../db/schema.js';
+import { apiKeys, bookMembers, books } from '../db/schema.js';
 
 /**
  * Memberships and API keys: the two ways a caller comes to have a role in a book.
@@ -27,6 +27,17 @@ export interface ApiKeyRecord {
   readonly revokedAt: Date | null;
 }
 
+export interface BookSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly baseCurrency: string;
+  readonly createdAt: Date;
+}
+
+export interface BookMembershipRecord extends BookSummary {
+  readonly role: BookRole;
+}
+
 export interface NewApiKey {
   readonly id: string;
   readonly bookId: string;
@@ -41,6 +52,10 @@ export interface MembershipRepository {
   findMembership(executor: Executor, bookId: string, userId: string): Promise<MembershipRecord | null>;
   /** Adds a member, or changes the role of one who is already there. */
   grantRole(executor: Executor, bookId: string, userId: string, role: BookRole): Promise<MembershipRecord>;
+
+  /** The books this user is a member of, with the role held in each, ordered by name. */
+  listBooksForUser(executor: Executor, userId: string): Promise<BookMembershipRecord[]>;
+  findBookById(executor: Executor, bookId: string): Promise<BookSummary | null>;
 
   insertApiKey(executor: Executor, key: NewApiKey): Promise<ApiKeyRecord>;
   findLiveApiKeyByHash(executor: Executor, tokenHash: string): Promise<ApiKeyRecord | null>;
@@ -96,6 +111,36 @@ export class DrizzleMembershipRepository implements MembershipRepository {
 
     if (granted === undefined) throw new Error(`grant of ${role} in book ${bookId} returned no row`);
     return granted;
+  }
+
+  async listBooksForUser(executor: Executor, userId: string): Promise<BookMembershipRecord[]> {
+    return executor
+      .select({
+        id: books.id,
+        name: books.name,
+        baseCurrency: books.baseCurrency,
+        createdAt: books.createdAt,
+        role: bookMembers.role,
+      })
+      .from(bookMembers)
+      .innerJoin(books, eq(books.id, bookMembers.bookId))
+      .where(eq(bookMembers.userId, userId))
+      .orderBy(books.name);
+  }
+
+  async findBookById(executor: Executor, bookId: string): Promise<BookSummary | null> {
+    const [book] = await executor
+      .select({
+        id: books.id,
+        name: books.name,
+        baseCurrency: books.baseCurrency,
+        createdAt: books.createdAt,
+      })
+      .from(books)
+      .where(eq(books.id, bookId))
+      .limit(1);
+
+    return book ?? null;
   }
 
   async insertApiKey(executor: Executor, key: NewApiKey): Promise<ApiKeyRecord> {
