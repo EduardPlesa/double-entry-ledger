@@ -209,6 +209,12 @@ export const postings = pgTable(
     // cost being carried on purpose rather than an oversight: it stays stage 7's work, where
     // it is measured, alongside the balance-checkpoint question it belongs with. See
     // docs/adr/0004-concurrency-control.md.
+    //
+    // This plan added a second reader of the same shape: `computeCheckpoint` sums
+    // `postings` by `account_id` to refresh a checkpoint, from `scripts/checkpoint.ts`
+    // rather than the write path, but over the same unindexed column. The index does not
+    // exist yet - it is still the other plan's work - but when it lands, the checkpoint
+    // read is one of the queries it gets measured against, not only the overdraft scan.
   ],
 );
 
