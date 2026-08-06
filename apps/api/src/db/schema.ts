@@ -213,6 +213,57 @@ export const postings = pgTable(
 );
 
 /**
+ * A balance, and the posting it was true through.
+ *
+ * `through_id` and not a date, and the difference is the whole reason this table exists. A
+ * checkpoint asserts the sum over postings with `id <= through_id`. `postings.id` is a
+ * bigserial assigned at insert, so an entry backdated in `occurred_at` still receives ids
+ * above everything already stored: the set this row summed is frozen the moment it is
+ * written, and no later insert can enter it.
+ *
+ * A checkpoint keyed on `occurred_at <= D` would assert a sum over a set that is *not*
+ * frozen. An entry recorded tomorrow, describing last March, lands inside it - and the
+ * stored number is then wrong with nothing in the row to say so. Invalidating it correctly
+ * means comparing every entry's `recorded_at` against every checkpoint's date, which is
+ * bitemporal bookkeeping and a different system. See docs/adr/0005-balance-checkpoints.md.
+ *
+ * The same asymmetry bounds what this can accelerate: `asOf` balances and the trial balance
+ * filter on `occurred_at`, and `lowestPrefixBalance` is a minimum over prefixes that a
+ * backdated entry rewrites behind any watermark. None of those can resume from here.
+ */
+export const balanceCheckpoints = pgTable(
+  'balance_checkpoints',
+  {
+    accountId: uuid('account_id').notNull(),
+
+    // Denormalised from accounts, exactly as postings.book_id is, and for the same reason:
+    // the policy stays a column comparison, and the composite foreign key below makes
+    // disagreement impossible.
+    bookId: uuid('book_id').notNull(),
+
+    throughId: bigint('through_id', { mode: 'bigint' }).notNull(),
+    balanceMinor: bigint('balance_minor', { mode: 'bigint' }).notNull(),
+
+    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Also the index the read uses: "the latest checkpoint for this account" is a backwards
+    // scan of this key, so no secondary index is needed.
+    primaryKey({ name: 'balance_checkpoints_pkey', columns: [t.accountId, t.throughId] }),
+
+    foreignKey({
+      name: 'balance_checkpoints_account_same_book_fk',
+      columns: [t.accountId, t.bookId],
+      foreignColumns: [accounts.id, accounts.bookId],
+    }),
+
+    // A watermark of zero would be a claim about no postings at all, which the empty sum
+    // already answers for free.
+    check('balance_checkpoints_through_id_positive', sql`${t.throughId} > 0`),
+  ],
+);
+
+/**
  * The three per-book roles. An enum for the same reason `account_type` is one: the set is
  * fixed by the policy map in `domain/policy.ts`, and a role the database accepts but the
  * policy map has never heard of would authorise nothing while looking like it authorises
