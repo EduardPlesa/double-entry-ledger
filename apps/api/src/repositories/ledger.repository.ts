@@ -1,6 +1,6 @@
-import { and, asc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
 import type { Executor } from '../db/client.js';
-import { accounts, books, entries, postings } from '../db/schema.js';
+import { accounts, balanceCheckpoints, books, entries, postings } from '../db/schema.js';
 
 /**
  * Data access. No business rules live here: this module knows how to read and write rows,
@@ -81,6 +81,27 @@ export interface LowestPrefix {
   readonly occurredAt: Date;
 }
 
+/** A stored balance, and the posting id it is true through. */
+export interface BalanceCheckpoint {
+  readonly accountId: string;
+  readonly throughId: bigint;
+  readonly balanceMinor: bigint;
+  readonly computedAt: Date;
+}
+
+/** What a checkpoint would say if written now. `throughId` is 0 when the account has no postings. */
+export interface ComputedCheckpoint {
+  readonly throughId: bigint;
+  readonly balanceMinor: bigint;
+}
+
+export interface NewCheckpoint {
+  readonly accountId: string;
+  readonly bookId: string;
+  readonly throughId: bigint;
+  readonly balanceMinor: bigint;
+}
+
 /** A posting joined to the entry that explains it, which is what a statement line is. */
 export interface PostingLine {
   readonly id: bigint;
@@ -135,6 +156,19 @@ export interface LedgerRepository {
   sumPostings(executor: Executor, accountId: string, asOf?: Date | undefined): Promise<bigint>;
   /** Sum of an account's postings up to and including a posting id. The cursor's opening balance. */
   sumPostingsThrough(executor: Executor, accountId: string, throughId: bigint): Promise<bigint>;
+  /** The account's highest checkpoint, or null if it has none. */
+  latestCheckpoint(executor: Executor, accountId: string): Promise<BalanceCheckpoint | null>;
+  /** The checkpoint the account's postings would justify right now. One statement, one snapshot. */
+  computeCheckpoint(executor: Executor, accountId: string): Promise<ComputedCheckpoint>;
+  /** Writes a checkpoint. False when one already exists at that watermark. */
+  insertCheckpoint(executor: Executor, checkpoint: NewCheckpoint): Promise<boolean>;
+  /** Sum of an account's postings after a watermark, optionally stopping at a second one. */
+  sumPostingsAfter(
+    executor: Executor,
+    accountId: string,
+    afterId: bigint,
+    throughId?: bigint | undefined,
+  ): Promise<bigint>;
   /**
    * The minimum running balance over the account's history, or null if it has no postings.
    * The overdraft rule is exactly `balanceMinor >= 0`.
@@ -429,6 +463,84 @@ export class DrizzleLedgerRepository implements LedgerRepository {
       .select({ total: sql<string>`coalesce(sum(${postings.amountMinor}), 0)::text` })
       .from(postings)
       .where(and(eq(postings.accountId, accountId), lte(postings.id, throughId)));
+
+    return BigInt(row?.total ?? '0');
+  }
+
+  async latestCheckpoint(executor: Executor, accountId: string): Promise<BalanceCheckpoint | null> {
+    const [row] = await executor
+      .select({
+        accountId: balanceCheckpoints.accountId,
+        throughId: balanceCheckpoints.throughId,
+        balanceMinor: balanceCheckpoints.balanceMinor,
+        computedAt: balanceCheckpoints.computedAt,
+      })
+      .from(balanceCheckpoints)
+      .where(eq(balanceCheckpoints.accountId, accountId))
+      // A backwards scan of the primary key. "Latest" is the highest watermark and not the
+      // most recent write: a checkpoint recomputed at an older watermark is still older.
+      .orderBy(desc(balanceCheckpoints.throughId))
+      .limit(1);
+
+    return row ?? null;
+  }
+
+  /**
+   * The watermark and the sum, from one statement and therefore from one snapshot.
+   *
+   * Two statements would be a bug with a narrow window and a permanent consequence: a
+   * posting committed between them lands above the watermark this reads and below the sum
+   * that reads it, and every balance served from the resulting checkpoint is short by
+   * exactly that posting until a later checkpoint supersedes it.
+   */
+  async computeCheckpoint(executor: Executor, accountId: string): Promise<ComputedCheckpoint> {
+    const [row] = await executor
+      .select({
+        throughId: sql<string>`coalesce(max(${postings.id}), 0)::text`,
+        balanceMinor: sql<string>`coalesce(sum(${postings.amountMinor}), 0)::text`,
+      })
+      .from(postings)
+      .where(eq(postings.accountId, accountId));
+
+    return {
+      throughId: BigInt(row?.throughId ?? '0'),
+      balanceMinor: BigInt(row?.balanceMinor ?? '0'),
+    };
+  }
+
+  /**
+   * ON CONFLICT DO NOTHING, because recomputing at an unchanged watermark produces the same
+   * number: a repeated refresh is a no-op rather than an error, and the maintenance script
+   * can be run twice without anyone having to think about it.
+   */
+  async insertCheckpoint(executor: Executor, checkpoint: NewCheckpoint): Promise<boolean> {
+    const written = await executor
+      .insert(balanceCheckpoints)
+      .values({
+        accountId: checkpoint.accountId,
+        bookId: checkpoint.bookId,
+        throughId: checkpoint.throughId,
+        balanceMinor: checkpoint.balanceMinor,
+      })
+      .onConflictDoNothing()
+      .returning({ throughId: balanceCheckpoints.throughId });
+
+    return written.length > 0;
+  }
+
+  async sumPostingsAfter(
+    executor: Executor,
+    accountId: string,
+    afterId: bigint,
+    throughId?: bigint | undefined,
+  ): Promise<bigint> {
+    const conditions = [eq(postings.accountId, accountId), gt(postings.id, afterId)];
+    if (throughId !== undefined) conditions.push(lte(postings.id, throughId));
+
+    const [row] = await executor
+      .select({ total: sql<string>`coalesce(sum(${postings.amountMinor}), 0)::text` })
+      .from(postings)
+      .where(and(...conditions));
 
     return BigInt(row?.total ?? '0');
   }
