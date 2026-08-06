@@ -398,3 +398,103 @@ describe('GET /books/:bookId/trial-balance', () => {
     expect(response.body.totals[0].debits).toBe('10.00');
   });
 });
+
+describe('GET /entries/:entryId', () => {
+  it('returns the entry with its legs, and null for reversedBy while it stands', async () => {
+    const fixture = await freshBook();
+    const posted = await post(fixture, '10.00');
+
+    const response = await api().get(`/entries/${posted.body.id}`).set('Authorization', auth());
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ id: posted.body.id, reversalOf: null, reversedBy: null });
+    expect(response.body.postings).toHaveLength(2);
+  });
+
+  it('names the reversal once one exists', async () => {
+    const fixture = await freshBook();
+    const posted = await post(fixture, '10.00');
+
+    const reversal = await api()
+      .post(`/entries/${posted.body.id}/reverse`)
+      .set('Authorization', auth())
+      .send({});
+
+    const response = await api().get(`/entries/${posted.body.id}`).set('Authorization', auth());
+
+    expect(response.body.reversedBy).toBe(reversal.body.id);
+  });
+
+  it('says the reversal itself reverses the original and is not reversed', async () => {
+    const fixture = await freshBook();
+    const posted = await post(fixture, '10.00');
+
+    const reversal = await api()
+      .post(`/entries/${posted.body.id}/reverse`)
+      .set('Authorization', auth())
+      .send({});
+
+    const response = await api()
+      .get(`/entries/${reversal.body.id}`)
+      .set('Authorization', auth());
+
+    expect(response.body).toMatchObject({ reversalOf: posted.body.id, reversedBy: null });
+  });
+
+  it('answers 404 for an entry that does not exist', async () => {
+    const response = await api()
+      .get('/entries/3f4d0b7e-9a5e-4c3b-8a52-2c1f5c9a1b23')
+      .set('Authorization', auth());
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('ENTRY_NOT_FOUND');
+  });
+});
+
+describe('POST /books/:bookId/entries, replayed after a reversal', () => {
+  it('reports reversedBy on a replayed 200, not the null a fresh create would carry', async () => {
+    // The replay is the same entry a client already reversed - the whole reason `reversedBy`
+    // exists is to let it stop offering a reversal that can only end in
+    // ENTRY_ALREADY_REVERSED, and a stale `null` here would defeat that.
+    const fixture = await freshBook();
+    const externalId = `invoice-${newId()}`;
+
+    const created = await api()
+      .post(`/books/${fixture.book.bookId}/entries`)
+      .set('Authorization', auth())
+      .send({
+        occurredAt: '2026-03-01T12:00:00.000Z',
+        description: 'a sale',
+        externalId,
+        legs: [
+          { accountId: fixture.cash, amount: '10.00', currency: 'EUR' },
+          { accountId: fixture.sales, amount: '-10.00', currency: 'EUR' },
+        ],
+      });
+    expect(created.status).toBe(201);
+    expect(created.body.reversedBy).toBeNull();
+
+    const reversal = await api()
+      .post(`/entries/${created.body.id}/reverse`)
+      .set('Authorization', auth())
+      .send({});
+    expect(reversal.status).toBe(201);
+
+    const replayed = await api()
+      .post(`/books/${fixture.book.bookId}/entries`)
+      .set('Authorization', auth())
+      .send({
+        occurredAt: '2026-03-01T12:00:00.000Z',
+        description: 'a sale',
+        externalId,
+        legs: [
+          { accountId: fixture.cash, amount: '10.00', currency: 'EUR' },
+          { accountId: fixture.sales, amount: '-10.00', currency: 'EUR' },
+        ],
+      });
+
+    expect(replayed.status).toBe(200);
+    expect(replayed.body.id).toBe(created.body.id);
+    expect(replayed.body.reversedBy).toBe(reversal.body.id);
+  });
+});

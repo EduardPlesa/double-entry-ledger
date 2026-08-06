@@ -1,4 +1,17 @@
-import { type Clock, type Money, money, parseMoney } from '@ledger/shared';
+import {
+  createAccountInput as createAccountSchema,
+  listPostingsInput as listPostingsOptionsSchema,
+  postEntryInput as postEntryInputSchema,
+  reverseEntryInput as reverseEntryInputSchema,
+  type Clock,
+  type CreateAccountInput,
+  type ListPostingsOptions,
+  type Money,
+  type PostEntryInput,
+  type ReverseEntryInput,
+  money,
+  parseMoney,
+} from '@ledger/shared';
 import { z } from 'zod';
 import type { Executor, UnitOfWork } from '../db/client.js';
 import { SQLSTATE, hasSqlState, isUniqueViolationOn } from '../db/pg-errors.js';
@@ -35,79 +48,7 @@ import { decodePostingCursor, encodePostingCursor } from './cursor.js';
 /** The index of the unique index behind `(book_id, external_id)`. Named so the race below can spot it. */
 const EXTERNAL_ID_INDEX = 'entries_book_id_external_id_key';
 
-const CURRENCY_RE = /^[A-Z]{3}$/;
-
-/**
- * Amounts cross this boundary as decimal strings - `"12.34"`, not `1234` and not `12.34` as
- * a JSON number - and are minor-unit bigints from here inward.
- *
- * Strings because JSON numbers are IEEE 754 doubles, and a ledger that can hold a value it
- * cannot round-trip through its own API is not one you would put money in. Decimal rather
- * than minor units because the caller then does not have to know that JPY has no minor unit
- * and KWD has three; that table lives in one place, in `packages/shared`, and both sides
- * import it. The tradeoff is one parse per leg and a stricter grammar - no `1e3`, no
- * thousands separators, never more decimal places than the currency has - which is
- * `parseMoney`'s job and is tested there.
- *
- * These schemas move to `packages/shared` in stage 3, when the frontend needs to import
- * them; they start here because nothing outside the service has an opinion about them yet.
- */
-const legInputSchema = z.object({
-  accountId: z.uuid('must be a UUID'),
-  amount: z.string(),
-  currency: z.string().regex(CURRENCY_RE, 'must be a three-letter ISO 4217 code, such as EUR'),
-});
-
-const postEntryInputSchema = z.object({
-  /** When it happened in the world. Asserted by the caller; never read from the clock. */
-  occurredAt: z.coerce.date(),
-  description: z.string().trim().min(1, 'must not be blank').max(1000),
-  /**
-   * Caller-supplied idempotency key. Unique per book, and the reason posting the same entry
-   * twice is safe.
-   */
-  externalId: z.string().trim().min(1, 'must not be blank').max(255).nullish(),
-  /**
-   * Two legs minimum. A single-leg entry cannot sum to zero unless the leg is zero, and a
-   * zero leg is rejected as well - so the alternative to this bound is a worse error message
-   * later, never an accepted entry.
-   */
-  legs: z.array(legInputSchema).min(2, 'an entry needs at least two legs').max(1000),
-});
-
-export type PostEntryInput = z.input<typeof postEntryInputSchema>;
-
-const listPostingsOptionsSchema = z.object({
-  cursor: z.string().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-});
-
-export type ListPostingsOptions = z.input<typeof listPostingsOptionsSchema>;
-
-/**
- * The five account types of double-entry bookkeeping, matching the Postgres enum. Fixed by
- * accounting rather than by product requirements - there will never be a sixth.
- */
-const createAccountSchema = z.object({
-  name: z.string().trim().min(1, 'must not be blank').max(200),
-  type: z.enum(['asset', 'liability', 'equity', 'revenue', 'expense']),
-  currency: z.string().regex(CURRENCY_RE, 'must be a three-letter ISO 4217 code, such as EUR'),
-  parentId: z.uuid('must be a UUID').nullish(),
-});
-
-export type CreateAccountInput = z.input<typeof createAccountSchema>;
-
-/**
- * Everything about a reversal is optional. The legs are determined by the original - that is
- * what makes it a reversal rather than a new entry that happens to look like one.
- */
-const reverseEntryInputSchema = z.object({
-  occurredAt: z.coerce.date().optional(),
-  description: z.string().trim().min(1, 'must not be blank').max(1000).optional(),
-  externalId: z.string().trim().min(1, 'must not be blank').max(255).nullish(),
-});
-
-export type ReverseEntryInput = z.input<typeof reverseEntryInputSchema>;
+export type { CreateAccountInput, ListPostingsOptions, PostEntryInput, ReverseEntryInput };
 
 /**
  * Who recorded an entry. Exactly one is set for anything written through the API; both are
@@ -150,6 +91,15 @@ export interface PostEntryResult {
    * retry after a timeout safe.
    */
   readonly created: boolean;
+  /**
+   * The reversal of `entry`, if one exists. Always `null` when `created` is true - an entry
+   * this call just inserted cannot already have been reversed, so that branch never looks it
+   * up. Populated from `findReversalOf` when `created` is false, because the entry being
+   * handed back was recorded earlier and may since have been reversed; reporting `null`
+   * unconditionally there would tell a client a reversal is safe when it can only fail with
+   * `ENTRY_ALREADY_REVERSED`.
+   */
+  readonly reversedBy: string | null;
 }
 
 export interface BalanceResult {
@@ -240,6 +190,19 @@ export class LedgerService {
   }
 
   /**
+   * Every account in a book, in one query.
+   *
+   * `transactionInBook` because `accounts` is behind the row-level security policy from
+   * migration `0006`, so the book id has to be set on the connection before the policy will
+   * return anything at all - the `WHERE` clause below it is belt as well as braces.
+   */
+  async listAccounts(bookId: string): Promise<AccountRecord[]> {
+    return this.unitOfWork.transactionInBook(bookId, (tx) =>
+      this.repository.listAccountsByBook(tx, bookId),
+    );
+  }
+
+  /**
    * Records an entry, or returns the one already recorded under the same `externalId`.
    *
    * The order of operations is the design:
@@ -280,7 +243,13 @@ export class LedgerService {
         // beforehand also narrows the window the race below has to lose.
         if (externalId !== null) {
           const existing = await this.repository.findEntryByExternalId(tx, bookId, externalId);
-          if (existing !== null) return { entry: existing, created: false };
+          if (existing !== null) {
+            // A replay: this entry was recorded on an earlier call and may since have been
+            // reversed. One more index lookup, in the same transaction, is what keeps that
+            // fact truthful in the response - see the note on `reversedBy`.
+            const reversal = await this.repository.findReversalOf(tx, existing.id);
+            return { entry: existing, created: false, reversedBy: reversal?.id ?? null };
+          }
         }
 
         const accounts = await this.assertPostable(tx, bookId, legs);
@@ -307,7 +276,8 @@ export class LedgerService {
 
         await this.assertNoOverdraft(tx, postedLegs, accounts);
 
-        return { entry, created: true };
+        // Just inserted: nothing can have reversed it yet.
+        return { entry, created: true, reversedBy: null };
       });
     } catch (error) {
       // Two callers posted the same external_id at once and this one lost. The winner's
@@ -322,10 +292,19 @@ export class LedgerService {
       // from. It is book-scoped like the first: the policy does not care that this read is
       // recovering from an error.
       if (externalId !== null && isUniqueViolationOn(error, EXTERNAL_ID_INDEX)) {
-        const existing = await this.unitOfWork.transactionInBook(bookId, (tx) =>
-          this.repository.findEntryByExternalId(tx, bookId, externalId),
-        );
-        if (existing !== null) return { entry: existing, created: false };
+        const existing = await this.unitOfWork.transactionInBook(bookId, async (tx) => {
+          const entry = await this.repository.findEntryByExternalId(tx, bookId, externalId);
+          if (entry === null) return null;
+
+          // Same reasoning as the ordinary replay branch above: the entry this recovers to
+          // was recorded by whoever won the race, and reporting it unreversed would be a
+          // guess, not a fact.
+          const reversal = await this.repository.findReversalOf(tx, entry.id);
+          return { entry, reversedBy: reversal?.id ?? null };
+        });
+        if (existing !== null) {
+          return { entry: existing.entry, created: false, reversedBy: existing.reversedBy };
+        }
       }
 
       throw translateWriteFailure(error);
@@ -430,6 +409,30 @@ export class LedgerService {
       await this.assertNoOverdraft(tx, legs, accounts);
 
       return reversal;
+    });
+  }
+
+  /**
+   * One entry, with the reversal that cancels it if there is one.
+   *
+   * Two queries in one transaction rather than a join: `findReversalOf` is an index lookup
+   * on a column that is null for almost every row, and joining it would repeat every entry
+   * column once per leg for the sake of one nullable id.
+   *
+   * `reversedBy` is what lets the reversal screen disable an action whose only possible
+   * outcome is `ENTRY_ALREADY_REVERSED`. The entry itself carries `reversalOf`, the link in
+   * the other direction, and neither can be derived from the other in one direction of read.
+   */
+  async getEntry(
+    bookId: string,
+    entryId: string,
+  ): Promise<{ entry: EntryRecord; reversedBy: string | null }> {
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const entry = await this.repository.findEntryById(tx, entryId);
+      if (entry === null) throw new EntryNotFoundError(entryId);
+
+      const reversal = await this.repository.findReversalOf(tx, entryId);
+      return { entry, reversedBy: reversal?.id ?? null };
     });
   }
 

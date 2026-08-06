@@ -4,9 +4,13 @@ import {
   DrizzleUnitOfWork,
   createDatabase,
   type ConcurrencyStrategy,
+  type Executor,
   type UnitOfWork,
 } from '../../src/db/client.js';
-import { DrizzleLedgerRepository } from '../../src/repositories/ledger.repository.js';
+import {
+  DrizzleLedgerRepository,
+  type EntryRecord,
+} from '../../src/repositories/ledger.repository.js';
 import { LedgerService } from '../../src/services/ledger.service.js';
 
 /** The instant every service test starts at. Fixed, so `recorded_at` is an assertable value. */
@@ -76,6 +80,47 @@ export function createServiceWithFailingTransaction(failure: unknown): LedgerSer
     clock: testClock(START),
     newId,
   });
+}
+
+/**
+ * A service whose idempotency read misses once, the way a racing caller's does.
+ *
+ * Losing a race for one `external_id` is defined entirely by what the loser saw: it read
+ * `entries` before the winner's row was committed, found nothing, and learned otherwise from
+ * the unique index. That first read is the only thing this substitutes, and only once - which
+ * is once per `postEntry` call, because the recovery branch's lookup is the second and is
+ * answered truthfully. Everything else is real: the insert collides with the real index, the
+ * recovery opens its own real transaction, and the reversal it reports comes from a real
+ * lookup.
+ *
+ * Without this, a race whose winner committed before the losers started is not a race at all.
+ * Every caller's read finds the entry and returns through the in-transaction replay branch,
+ * and the recovery below it never runs - so the reversal it reports would go untested.
+ */
+export function createServiceBlindToItsFirstReplayRead(pool: Pool): LedgerService {
+  return new LedgerService({
+    repository: new ReplayBlindRepository(),
+    unitOfWork: new DrizzleUnitOfWork(createDatabase(pool), { strategy: 'row-lock' }),
+    clock: testClock(START),
+    newId,
+  });
+}
+
+class ReplayBlindRepository extends DrizzleLedgerRepository {
+  #blind = true;
+
+  override async findEntryByExternalId(
+    executor: Executor,
+    bookId: string,
+    externalId: string,
+  ): Promise<EntryRecord | null> {
+    if (this.#blind) {
+      this.#blind = false;
+      return null;
+    }
+
+    return super.findEntryByExternalId(executor, bookId, externalId);
+  }
 }
 
 export function createServiceWithoutDatabase(): LedgerService {

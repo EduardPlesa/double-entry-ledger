@@ -1,4 +1,4 @@
-import type { Clock } from '@ledger/shared';
+import { credentials as credentialsSchema, type Clock, type CredentialsInput } from '@ledger/shared';
 import { z } from 'zod';
 import type { Executor, UnitOfWork } from '../db/client.js';
 import { isUniqueViolationOn } from '../db/pg-errors.js';
@@ -32,29 +32,7 @@ import {
  * costs one login. A false negative costs the account.
  */
 
-const emailSchema = z
-  .string()
-  .trim()
-  .toLowerCase()
-  .min(3)
-  .max(320)
-  .regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, 'must be an email address');
-
-/**
- * Twelve characters, and no composition rules.
- *
- * The upper bound is not a strength consideration - it is there because the password is fed
- * to a deliberately expensive hash, and an unbounded one lets a caller choose how much CPU
- * this process spends on their request.
- */
-const passwordSchema = z.string().min(12, 'must be at least 12 characters').max(1024);
-
-const credentialsSchema = z.object({
-  email: emailSchema,
-  password: passwordSchema,
-});
-
-export type CredentialsInput = z.input<typeof credentialsSchema>;
+export type { CredentialsInput };
 
 /** What a browser is told about itself, recorded on the token for the incident report. */
 export interface SessionContext {
