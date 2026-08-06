@@ -2,6 +2,7 @@ import { formatMoney, money } from '@ledger/shared';
 import fc from 'fast-check';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { DrizzleLedgerRepository } from '../../src/repositories/ledger.repository.js';
 import { accountsOf, seedBookIn } from '../helpers/ledger.js';
 import { assertCheckpointAgreement } from './checkpoint.js';
 import { ledgerCommands, type Real, type Tally } from './commands.js';
@@ -18,6 +19,7 @@ import { propertyRuns } from './runs.js';
  */
 
 let pool: Pool;
+const repository = new DrizzleLedgerRepository();
 
 beforeAll(() => {
   pool = new Pool({ connectionString: inject('appUrl'), max: 10 });
@@ -43,20 +45,32 @@ describe('arbitrary sequences of entries, reversals and checkpoints', () => {
    */
   it('a checkpointed balance always equals the sum from zero', async () => {
     const tally: Tally = { accepted: 0, refused: 0, reversalsAccepted: 0, reversalsRefused: 0 };
+    // Cases where a checkpoint actually got to resume with later writes above its watermark -
+    // the scenario the design exists for. A checkpoint taken as the very last thing in a
+    // sequence proves nothing (empty suffix), so this only counts when it wasn't.
+    const coverage = { casesWithLaterWrites: 0 };
     const shape = accountsOf(await seedBookIn(pool));
     const commands = ledgerCommands(shape, tally);
 
     await fc.assert(
       fc.asyncProperty(
         commands,
-        // Where in the sequence to checkpoint, and which account. Indices, resolved against
-        // this case's own accounts inside the run, for the same reason the commands are.
+        // Raw draws, deliberately not pre-bounded to the sequence length: `ledgerCommands`
+        // caps a sequence at 12 (`maxCommands`) but its actual length varies per case and
+        // isn't known until `commands` is generated alongside this. Bounded to the real
+        // length below, by the same modulo technique `ReadBalanceCommand` and
+        // `ReverseEntryCommand` already use for their own indices - the earlier version of
+        // this arbitrary used `fc.nat({ max: 40 })` directly as an index against sequences of
+        // at most 12, so most draws landed past the end and checkpointed nothing new.
         fc.array(fc.nat({ max: 40 }), { minLength: 1, maxLength: 4 }),
         async (commands, checkpointAt) => {
           const book = await createPropertyBook(pool);
           const model = book.newModel();
           const real = realOf(book);
-          const points = new Set(checkpointAt);
+          const commandArray = [...commands];
+          const points = new Set(
+            commandArray.length === 0 ? [] : checkpointAt.map((n) => n % commandArray.length),
+          );
 
           // Driven with a plain loop rather than a single `fc.asyncModelRun(setup, commands)`
           // call, so a checkpoint sweep can be interleaved between individual commands. That
@@ -66,7 +80,7 @@ describe('arbitrary sequences of entries, reversals and checkpoints', () => {
           // valid (length-one) iterable and the shrinker-relevant behaviour (pre/postConditions,
           // `toString()` on failure) stays exactly what the library provides.
           let index = 0;
-          for (const command of commands) {
+          for (const command of commandArray) {
             await fc.asyncModelRun(() => ({ model, real }), [command]);
 
             if (points.has(index)) {
@@ -78,6 +92,27 @@ describe('arbitrary sequences of entries, reversals and checkpoints', () => {
           }
 
           await assertCheckpointAgreement(book);
+
+          // Did any account, in this case, end up resuming from a checkpoint that isn't also
+          // the latest posting - i.e. a checkpoint with at least one posting recorded above
+          // its watermark? `computeCheckpoint` reports the current max posting id "for free"
+          // (it is exactly what a fresh checkpoint would write), so comparing it against the
+          // latest checkpoint's `throughId` answers this without summing anything.
+          const resumedWithLaterWrites = await book.unitOfWork.transactionInBook(
+            book.bookId,
+            async (tx) => {
+              for (const account of book.accounts) {
+                const checkpoint = await repository.latestCheckpoint(tx, account.id);
+                if (checkpoint === null) continue;
+
+                const computed = await repository.computeCheckpoint(tx, account.id);
+                if (computed.throughId > checkpoint.throughId) return true;
+              }
+              return false;
+            },
+          );
+
+          if (resumedWithLaterWrites) coverage.casesWithLaterWrites += 1;
         },
       ),
       { numRuns: propertyRuns() },
@@ -87,6 +122,14 @@ describe('arbitrary sequences of entries, reversals and checkpoints', () => {
     // sequences were all refused would agree the two paths agree without either path ever
     // having summed anything interesting.
     expect(tally.accepted, 'no entry was ever accepted').toBeGreaterThan(0);
+
+    // And the guard specific to this file: a run where every checkpoint happened to land on
+    // (or after) the last write would agree the two paths agree without ever putting a
+    // checkpoint in the position it exists for - resumed from, with something above it.
+    expect(
+      coverage.casesWithLaterWrites,
+      'no case ever resumed from a checkpoint with writes landing above its watermark',
+    ).toBeGreaterThan(0);
   });
 });
 
