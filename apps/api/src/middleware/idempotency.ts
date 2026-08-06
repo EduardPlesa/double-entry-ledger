@@ -178,6 +178,13 @@ function captureAndComplete(
  * forever. The key still does what it promises here: it guarantees the withdrawal happens at
  * most once, which is the property that matters, and it is the response rather than the effect
  * that is allowed to differ between attempts.
+ *
+ * `EntryResource.reversedBy` is the first mutable field to sit inside a body this cache freezes:
+ * a replayed `POST /entries` can report an entry as unreversed after it has, in fact, since been
+ * reversed through a different request. That is the same contract as everywhere else in this
+ * comment, not an oversight - retrying the same HTTP call returns the same HTTP response, and
+ * whether that response happens to still describe the current state of the ledger is exactly
+ * what this function does not promise.
  */
 /** The one code this cache refuses to serve stale, typed so renaming it fails the build here too. */
 const NOT_REPLAYABLE_CODE: DomainErrorCode = 'ACCOUNT_OVERDRAWN';

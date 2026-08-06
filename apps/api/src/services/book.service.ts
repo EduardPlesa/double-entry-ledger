@@ -1,4 +1,9 @@
-import type { Clock } from '@ledger/shared';
+import {
+  createBookInput as createBookSchema,
+  type BookResource,
+  type Clock,
+  type CreateBookInput,
+} from '@ledger/shared';
 import { z } from 'zod';
 import { generateApiKey } from '../auth/tokens.js';
 import type { ApiKeyEnvironment } from '../config.js';
@@ -8,7 +13,11 @@ import { BOOK_ROLES } from '../domain/policy.js';
 import type { Principal } from '../http/context.js';
 import type { AuthRepository } from '../repositories/auth.repository.js';
 import type { BookRecord, LedgerRepository } from '../repositories/ledger.repository.js';
-import type { ApiKeyRecord, MembershipRepository } from '../repositories/membership.repository.js';
+import type {
+  ApiKeyRecord,
+  BookMembershipRecord,
+  MembershipRepository,
+} from '../repositories/membership.repository.js';
 
 /**
  * Books, their members, and the keys machines use to reach them.
@@ -19,14 +28,7 @@ import type { ApiKeyRecord, MembershipRepository } from '../repositories/members
  * writes go in one transaction, and the service that spans them is the right place for it.
  */
 
-const createBookSchema = z.object({
-  name: z.string().trim().min(1, 'must not be blank').max(200),
-  baseCurrency: z
-    .string()
-    .regex(/^[A-Z]{3}$/, 'must be a three-letter ISO 4217 code, such as EUR'),
-});
-
-export type CreateBookInput = z.input<typeof createBookSchema>;
+export type { CreateBookInput };
 
 const grantRoleSchema = z.object({
   /**
@@ -159,6 +161,42 @@ export class BookService {
 
     return { key, token: generated.token };
   }
+
+  /**
+   * Every book this caller can reach, and what they may do in it.
+   *
+   * A user may belong to many books; an API key is scoped to exactly one, which is why the
+   * two principals take different paths to the same answer rather than one query with a
+   * branch inside it. Neither table is behind row-level security, so this runs in a plain
+   * transaction: there is no book context to be inside of before the caller has been told
+   * which books exist.
+   */
+  async listBooks(principal: Principal): Promise<BookResource[]> {
+    return this.unitOfWork.transaction(async (tx) => {
+      if (principal.kind === 'user') {
+        const rows = await this.membershipRepository.listBooksForUser(tx, principal.userId);
+        return rows.map(toBookResource);
+      }
+
+      const book = await this.membershipRepository.findBookById(tx, principal.bookId);
+      return book === null ? [] : [toBookResource({ ...book, role: principal.role })];
+    });
+  }
+}
+
+/**
+ * A `BookRecord` plus the caller's role in it, shaped into the resource every read of a book
+ * returns - including the one `POST /books` hands back for the book it just created, whose
+ * creator is always its owner.
+ */
+export function toBookResource(record: BookMembershipRecord): BookResource {
+  return {
+    id: record.id,
+    name: record.name,
+    baseCurrency: record.baseCurrency,
+    createdAt: record.createdAt.toISOString(),
+    role: record.role,
+  };
 }
 
 function parse<T extends z.ZodType>(schema: T, input: unknown, subject: string): z.output<T> {

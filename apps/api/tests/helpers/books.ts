@@ -91,7 +91,7 @@ export async function issueApiKey(
 export async function createAccount(
   application: TestApplication,
   book: TestBook,
-  overrides: { name?: string; type?: string; currency?: string } = {},
+  overrides: { name?: string; type?: string; currency?: string; parentId?: string } = {},
 ): Promise<string> {
   const response = await request(application.app)
     .post(`/books/${book.bookId}/accounts`)
@@ -100,6 +100,7 @@ export async function createAccount(
       name: overrides.name ?? 'Cash',
       type: overrides.type ?? 'asset',
       currency: overrides.currency ?? 'EUR',
+      ...(overrides.parentId === undefined ? {} : { parentId: overrides.parentId }),
     });
 
   if (response.status !== 201) {

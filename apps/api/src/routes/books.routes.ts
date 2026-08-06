@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express';
 import { ApiKeyNotPermittedError } from '../domain/errors.js';
 import { bookAccessOf, principalOf } from '../http/context.js';
-import type { BookService } from '../services/book.service.js';
+import { toBookResource, type BookService } from '../services/book.service.js';
 import type { RouteDefinition } from './registry.js';
 
 /**
@@ -31,16 +31,17 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
     const book = await books.createBook(principal.userId, request.body);
 
     // 201 with Location, which is what makes this a create rather than a POST that happens to
-    // return something.
+    // return something. The same conversion `GET /books` uses, not a second hand-built
+    // literal - the creator of a book is always its owner, so `role: 'owner'` is a fact here,
+    // not a guess.
     response
       .status(201)
       .location(`/books/${book.id}`)
-      .json({
-        id: book.id,
-        name: book.name,
-        baseCurrency: book.baseCurrency,
-        createdAt: book.createdAt.toISOString(),
-      });
+      .json(toBookResource({ ...book, role: 'owner' }));
+  };
+
+  const listBooks: RequestHandler = async (_request, response) => {
+    response.json(await books.listBooks(principalOf(response)));
   };
 
   const addMember: RequestHandler = async (request, response) => {
@@ -86,6 +87,13 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       access: { kind: 'authenticated' },
       summary: 'Create a book, owned by the caller',
       handler: createBook,
+    },
+    {
+      method: 'get',
+      path: '/books',
+      access: { kind: 'authenticated' },
+      summary: 'List the books this caller can reach',
+      handler: listBooks,
     },
     {
       method: 'post',

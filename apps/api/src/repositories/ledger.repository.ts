@@ -20,6 +20,7 @@ export interface AccountRecord {
   readonly name: string;
   readonly type: 'asset' | 'liability' | 'equity' | 'revenue' | 'expense';
   readonly currency: string;
+  readonly parentId: string | null;
   readonly closedAt: Date | null;
 }
 
@@ -151,6 +152,8 @@ export interface LedgerRepository {
     accountId: string,
     options: { afterId: bigint | undefined; limit: number },
   ): Promise<PostingLine[]>;
+  /** Every account in a book, ordered the way a tree is read: by type, then by name. */
+  listAccountsByBook(executor: Executor, bookId: string): Promise<AccountRecord[]>;
 }
 
 export class DrizzleLedgerRepository implements LedgerRepository {
@@ -181,6 +184,7 @@ export class DrizzleLedgerRepository implements LedgerRepository {
       name: accounts.name,
       type: accounts.type,
       currency: accounts.currency,
+      parentId: accounts.parentId,
       closedAt: accounts.closedAt,
     });
 
@@ -218,6 +222,7 @@ export class DrizzleLedgerRepository implements LedgerRepository {
         name: accounts.name,
         type: accounts.type,
         currency: accounts.currency,
+        parentId: accounts.parentId,
         closedAt: accounts.closedAt,
       })
       .from(accounts)
@@ -569,5 +574,22 @@ export class DrizzleLedgerRepository implements LedgerRepository {
       .where(and(...conditions))
       .orderBy(asc(postings.id))
       .limit(options.limit);
+  }
+
+  /** Every account in a book, ordered the way a tree is read: by type, then by name. */
+  async listAccountsByBook(executor: Executor, bookId: string): Promise<AccountRecord[]> {
+    return executor
+      .select({
+        id: accounts.id,
+        bookId: accounts.bookId,
+        name: accounts.name,
+        type: accounts.type,
+        currency: accounts.currency,
+        parentId: accounts.parentId,
+        closedAt: accounts.closedAt,
+      })
+      .from(accounts)
+      .where(eq(accounts.bookId, bookId))
+      .orderBy(accounts.type, accounts.name);
   }
 }

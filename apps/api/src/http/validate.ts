@@ -64,10 +64,7 @@ export function uuidPathParam(params: Record<string, unknown>, name: string): st
   return parsed.data;
 }
 
-export const paginationQuery = z.object({
-  cursor: z.string().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
-});
+export { paginationQuery } from '@ledger/shared';
 
 /**
  * `asOf` as an ISO 8601 instant.

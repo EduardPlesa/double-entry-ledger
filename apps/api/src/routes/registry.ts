@@ -29,9 +29,11 @@ export type RouteAccess =
   /** No credential required. The auth endpoints, and health. */
   | { readonly kind: 'public' }
   /**
-   * A valid access token, and nothing more. Only for operations that are not about a book
-   * that already exists - creating one, most obviously, since there is no membership to
-   * check against a book that does not exist yet.
+   * A valid access token, and nothing more. For operations where no book can be named in the
+   * request - either because it does not exist yet, as with creating one, or because the
+   * caller does not yet know which books are theirs, as with listing them. There is no
+   * membership to check against a book neither the path nor the caller can identify; the
+   * handler's own query is what scopes the answer.
    */
   | { readonly kind: 'authenticated' }
   /** A permission, checked against the caller's role in the resolved book. */

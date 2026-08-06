@@ -12,9 +12,9 @@
  * here and nowhere else.
  */
 
-export const BOOK_ROLES = ['owner', 'accountant', 'viewer'] as const;
+import { BOOK_ROLES, type BookRole } from '@ledger/shared';
 
-export type BookRole = (typeof BOOK_ROLES)[number];
+export { BOOK_ROLES, type BookRole };
 
 export const POLICY = {
   'book:read': ['owner', 'accountant', 'viewer'],

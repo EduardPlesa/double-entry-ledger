@@ -93,6 +93,19 @@ describe('every route declares an access requirement', () => {
     ]);
   });
 
+  it('keeps authenticated-tier routes to the ones no book can be named against', () => {
+    // Same reasoning as the public allowlist above, one tier up: `authenticated` skips the
+    // membership check entirely, so putting a route there is a decision that should have to be
+    // made twice - once in the registry, once here - rather than inherited by whichever route
+    // happens to come next.
+    const authenticatedPaths = definitions()
+      .filter((definition) => definition.access.kind === 'authenticated')
+      .map((definition) => `${definition.method} ${definition.path}`)
+      .sort();
+
+    expect(authenticatedPaths).toEqual(['get /books', 'post /books']);
+  });
+
   it('gives every route a summary', () => {
     // Stage 7 generates an OpenAPI document from these. A blank summary is a blank entry in
     // the published documentation.
