@@ -92,10 +92,13 @@ describe('listPostings', () => {
       service.listPostings(book.bookId, book.cash, { cursor: cursor ?? undefined, limit: 10 }),
     );
 
-    // The extra one is `sumPostingsThrough`: a fresh sum-from-zero up to the cursor, which is
-    // the query stage 7 replaces with a checkpoint lookup. Pinned so that replacement is a
-    // deliberate edit to this number rather than a silent change.
-    expect(second.statements, second.statements.join('\n')).toHaveLength(6);
+    // Two more than the first page, not one: `latestCheckpoint` looks for a watermark to
+    // resume from, finds none for this account, and `balanceThrough` falls back to
+    // `sumPostingsThrough` - the same fresh sum-from-zero this used to run unconditionally.
+    // The count is still constant per page rather than growing with it, which is the
+    // property this file exists to defend; a checkpoint lookup replacing the plain sum here
+    // would have kept it at one extra, but there is none for this account to find.
+    expect(second.statements, second.statements.join('\n')).toHaveLength(7);
   });
 });
 

@@ -108,6 +108,14 @@ export interface BalanceResult {
   readonly balance: Money;
 }
 
+export interface CheckpointResult {
+  readonly accountId: string;
+  readonly throughId: bigint;
+  readonly balance: Money;
+  /** False when a checkpoint already existed at this watermark, or the account has no postings. */
+  readonly written: boolean;
+}
+
 export interface PostingLineResult {
   readonly id: bigint;
   readonly entryId: string;
@@ -506,20 +514,62 @@ export class LedgerService {
   async getBalance(bookId: string, accountId: string, asOf?: Date | undefined): Promise<BalanceResult> {
     return this.unitOfWork.transactionInBook(bookId, async (tx) => {
       const account = await this.requireAccount(tx, accountId);
-      const total = await this.repository.sumPostings(tx, accountId, asOf);
+      const total =
+        asOf === undefined
+          ? await this.balanceThrough(tx, accountId)
+          : // An occurred_at question. The checkpoint knows nothing about the dates of the
+            // postings it summed, so this stays a sum from zero - see the table comment.
+            await this.repository.sumPostings(tx, accountId, asOf);
 
       return { accountId, asOf: asOf ?? null, balance: money(total, account.currency) };
     });
   }
 
   /**
+   * Writes a checkpoint for one account.
+   *
+   * Called by the maintenance script and by tests, never by the write path. Stage 4's ADR is
+   * about keeping the entry-insert critical section narrow, and it holds the account's row
+   * lock while a prefix scan runs; adding a write to it to make a *read* faster would be
+   * paying in the one currency this system is short of.
+   *
+   * A stale checkpoint costs read time and never correctness: the balance is still
+   * `checkpoint + everything after it`, however long ago the checkpoint was taken.
+   */
+  async checkpointAccount(bookId: string, accountId: string): Promise<CheckpointResult> {
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const account = await this.requireAccount(tx, accountId);
+      const computed = await this.repository.computeCheckpoint(tx, accountId);
+
+      // No postings, no watermark. The empty sum already answers this account for free, and
+      // the CHECK constraint on `through_id` refuses the row anyway.
+      if (computed.throughId === 0n) {
+        return { accountId, throughId: 0n, balance: money(0n, account.currency), written: false };
+      }
+
+      const written = await this.repository.insertCheckpoint(tx, {
+        accountId,
+        bookId,
+        throughId: computed.throughId,
+        balanceMinor: computed.balanceMinor,
+      });
+
+      return {
+        accountId,
+        throughId: computed.throughId,
+        balance: money(computed.balanceMinor, account.currency),
+        written,
+      };
+    });
+  }
+
+  /**
    * One page of an account's postings, oldest first, each with the balance after it.
    *
-   * A bounded number of queries per page - three, or two on the first page - regardless of
+   * A bounded number of queries per page - four, or two on the first page - regardless of
    * page size, so this cannot become an N+1. The running balance starts from the sum of
-   * everything up to the cursor, which is a fresh sum-from-zero on every page and therefore
-   * the slow part; stage 7 replaces that one query with a checkpoint lookup and asserts the
-   * two agree.
+   * everything up to the cursor, which now resumes from the account's latest checkpoint
+   * instead of a fresh sum-from-zero on every page.
    *
    * Every posting on an account shares the account's currency - the composite foreign key on
    * `postings` makes any other combination unrepresentable - so a single running total is
@@ -537,9 +587,7 @@ export class LedgerService {
       const account = await this.requireAccount(tx, accountId);
 
       const opening =
-        afterId === undefined
-          ? 0n
-          : await this.repository.sumPostingsThrough(tx, accountId, afterId);
+        afterId === undefined ? 0n : await this.balanceThrough(tx, accountId, afterId);
 
       // One row more than asked for: the cheapest way to know whether a next page exists
       // without a second count query, and the extra row is discarded.
@@ -550,6 +598,38 @@ export class LedgerService {
 
       return buildPostingPage({ accountId, currency: account.currency, rows, limit, opening });
     });
+  }
+
+  /**
+   * An account's balance, through a posting id or through all of them, resuming from the
+   * latest checkpoint when there is one that helps.
+   *
+   * "That helps" is the second condition: a checkpoint above the requested `throughId`
+   * summed postings the caller has asked to exclude, so it is not a starting point for this
+   * question and the sum from zero answers it instead. That happens on any page whose cursor
+   * points behind the newest checkpoint, which is every page but the last few.
+   */
+  private async balanceThrough(
+    tx: Executor,
+    accountId: string,
+    throughId?: bigint | undefined,
+  ): Promise<bigint> {
+    const checkpoint = await this.repository.latestCheckpoint(tx, accountId);
+
+    if (checkpoint === null || (throughId !== undefined && checkpoint.throughId > throughId)) {
+      return throughId === undefined
+        ? this.repository.sumPostings(tx, accountId)
+        : this.repository.sumPostingsThrough(tx, accountId, throughId);
+    }
+
+    const delta = await this.repository.sumPostingsAfter(
+      tx,
+      accountId,
+      checkpoint.throughId,
+      throughId,
+    );
+
+    return checkpoint.balanceMinor + delta;
   }
 
   /**
