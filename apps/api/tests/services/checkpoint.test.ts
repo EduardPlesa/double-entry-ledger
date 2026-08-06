@@ -111,7 +111,7 @@ describe('checkpointAccount', () => {
     expect(asOf.balance.amountMinor).toBe(1000n);
   });
 
-  it('opens a page from the checkpoint and agrees with the sum from zero', async () => {
+  it('opens a page from the sum-from-zero fallback when the cursor sits behind the checkpoint', async () => {
     for (let i = 0; i < 5; i += 1) {
       await post({ amountMinor: 1000n, occurredAt: `2026-02-0${(i + 1).toString()}T00:00:00.000Z` });
     }
@@ -123,8 +123,37 @@ describe('checkpointAccount', () => {
       limit: 2,
     });
 
-    // The third and fourth postings, so the running balance opens at 2000 and closes at 4000.
+    // The checkpoint's watermark is the fifth posting; this page's cursor is the second, so
+    // `balanceThrough` takes the fallback - `checkpoint.throughId > afterId` - and the opening
+    // balance is a fresh sum-from-zero, not `checkpoint.balanceMinor + delta`. The third and
+    // fourth postings, so the running balance opens at 2000 and closes at 4000.
     expect(second.items[0]?.runningBalance.amountMinor).toBe(3000n);
     expect(second.items[1]?.runningBalance.amountMinor).toBe(4000n);
+  });
+
+  it('opens a page from the checkpoint delta when the cursor sits ahead of it', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await post({ amountMinor: 1000n, occurredAt: `2026-02-0${(i + 1).toString()}T00:00:00.000Z` });
+    }
+    const checkpoint = await service.checkpointAccount(book.bookId, book.cash);
+    expect(checkpoint.written).toBe(true);
+
+    for (let i = 3; i < 7; i += 1) {
+      await post({ amountMinor: 1000n, occurredAt: `2026-02-0${(i + 1).toString()}T00:00:00.000Z` });
+    }
+
+    const first = await service.listPostings(book.bookId, book.cash, { limit: 5 });
+    const second = await service.listPostings(book.bookId, book.cash, {
+      cursor: first.nextCursor ?? undefined,
+      limit: 2,
+    });
+
+    // The checkpoint's watermark is the third posting; this page's cursor is the fifth, above
+    // it, so `balanceThrough` takes `checkpoint.balanceMinor + sumPostingsAfter(...)` - the
+    // branch the fallback-only version of this test never reached. The opening balance is the
+    // checkpoint's 3000 plus the fourth and fifth postings (2000), and the sixth and seventh
+    // postings then carry it to 6000 and 7000.
+    expect(second.items[0]?.runningBalance.amountMinor).toBe(6000n);
+    expect(second.items[1]?.runningBalance.amountMinor).toBe(7000n);
   });
 });
