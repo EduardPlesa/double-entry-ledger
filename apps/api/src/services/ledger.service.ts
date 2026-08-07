@@ -562,8 +562,7 @@ export class LedgerService {
    * did not used to pay. Two earlier designs tried to avoid paying it: comparing each posting's
    * `xmin` against a snapshot boundary, and draining every transaction a snapshot's `xip_list`
    * named before recomputing. Both were disproved with a reproducible counter-example rather
-   * than shipped - see `.superpowers/sdd/2026-08-06-stage-7-checkpoints/
-   * final-review-fix-report.md` for both. `computeCheckpoint`'s `max(postings.id)` plus
+   * than shipped - see `docs/adr/0005-balance-checkpoints.md` for both. `computeCheckpoint`'s `max(postings.id)` plus
    * `sum(amount_minor)`, in one statement, is only a safe watermark if nothing can be mid-insert
    * for this account while it runs, and the lock is what makes that true rather than assumed:
    * with it held, no writer can be between drawing a posting id and committing it, so the
@@ -766,8 +765,7 @@ export class LedgerService {
    * transactional - so id order and commit order can disagree, and two attempts to infer a safe
    * watermark from that alone (comparing row `xmin` against a snapshot's `xmin`; draining every
    * transaction visible in a snapshot's `xip_list`) were each disproved with a reproducible
-   * counter-example rather than shipped - see `.superpowers/sdd/2026-08-06-stage-7-checkpoints/
-   * final-review-fix-report.md`. Locking the account removes the need to infer anything: with
+   * counter-example rather than shipped - see `docs/adr/0005-balance-checkpoints.md`. Locking the account removes the need to infer anything: with
    * the lock held, nothing can be mid-insert for it, full stop.
    *
    * That widens the critical section on every write, not only the ones that could overdraw

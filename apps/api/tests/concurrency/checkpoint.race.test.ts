@@ -19,8 +19,7 @@ import { createService } from '../helpers/service.js';
  * and I simply cannot see its uncommitted row yet". Two designs that tried to make that read
  * alone sufficient - comparing each posting's `xmin` against a snapshot boundary, then draining
  * every transaction a snapshot's `xip_list` named before recomputing - were each disproved with
- * a reproducible counter-example; see `.superpowers/sdd/2026-08-06-stage-7-checkpoints/
- * final-review-fix-report.md`. What actually closes the race is `checkpointAccount` and the
+ * a reproducible counter-example; see `docs/adr/0005-balance-checkpoints.md`. What actually closes the race is `checkpointAccount` and the
  * write path both taking the account's `FOR NO KEY UPDATE` lock: with it held, nothing can be
  * mid-insert for the account, so the read really does describe a closed set.
  *
