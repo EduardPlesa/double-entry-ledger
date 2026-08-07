@@ -1,7 +1,7 @@
-import { formatMoney, money } from '@ledger/shared';
+import { formatMoney, money, newId } from '@ledger/shared';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
-import type { LedgerService } from '../../src/services/ledger.service.js';
+import { CheckpointRequiresRowLockError, type LedgerService } from '../../src/services/ledger.service.js';
 import { seedBookIn, type Book } from '../helpers/ledger.js';
 import { createService } from '../helpers/service.js';
 
@@ -155,5 +155,50 @@ describe('checkpointAccount', () => {
     // postings then carry it to 6000 and 7000.
     expect(second.items[0]?.runningBalance.amountMinor).toBe(6000n);
     expect(second.items[1]?.runningBalance.amountMinor).toBe(7000n);
+  });
+});
+
+/**
+ * `checkpointAccount`'s refusal under `serializable`, and that `row-lock` is unaffected by it.
+ *
+ * Every other test in this file already exercises `row-lock` - it is what `createService(pool)`
+ * defaults to - so this is where the *other* strategy, and the boundary between the two, gets
+ * its own coverage rather than being left to a comment's word for it.
+ */
+describe('checkpointAccount and the serializable strategy', () => {
+  it('refuses before any read, for a book and account that do not even exist', async () => {
+    const serializable = createService(pool, { strategy: 'serializable' }).service;
+
+    // Nonexistent ids on purpose: `AccountNotFoundError` would mean this got as far as a
+    // lookup before refusing, which is exactly the ordering this test is here to rule out.
+    await expect(serializable.checkpointAccount(newId(), newId())).rejects.toThrow(
+      CheckpointRequiresRowLockError,
+    );
+  });
+
+  it('refuses for a real, checkpointable account too, not only a missing one', async () => {
+    const serializable = createService(pool, { strategy: 'serializable' }).service;
+
+    await post({ amountMinor: 5000n, occurredAt: '2026-02-01T00:00:00.000Z' });
+
+    await expect(serializable.checkpointAccount(book.bookId, book.cash)).rejects.toThrow(
+      CheckpointRequiresRowLockError,
+    );
+
+    // Nothing was written: a checkpoint this method could not vouch for must not exist either.
+    const checkpointed = await service.checkpointAccount(book.bookId, book.cash);
+    expect(checkpointed.written).toBe(true);
+    expect(checkpointed.throughId).toBeGreaterThan(0n);
+  });
+
+  it('is unaffected under row-lock - the strategy every other test in this file already uses', async () => {
+    const rowLock = createService(pool, { strategy: 'row-lock' }).service;
+
+    await post({ amountMinor: 1234n, occurredAt: '2026-02-01T00:00:00.000Z' });
+
+    const result = await rowLock.checkpointAccount(book.bookId, book.cash);
+
+    expect(result.written).toBe(true);
+    expect(result.balance.amountMinor).toBe(1234n);
   });
 });
