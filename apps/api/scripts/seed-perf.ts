@@ -74,14 +74,18 @@ async function main(): Promise<void> {
       bookId = await seedBookAndAccounts(pool);
     });
 
-    await disableTriggers(pool);
     try {
+      await disableTriggers(pool);
       await timed('entries', () => seedEntries(pool, bookId, entryCount));
       await timed('postings', () => seedPostings(pool, bookId));
     } finally {
-      // Re-enabled even if the load above threw. A failed load must not leave the database
-      // with its invariants switched off for whoever runs the next migration or the next
-      // seed - see the module comment.
+      // Re-enabled unconditionally, however far the block above got - including if
+      // disableTriggers itself threw partway through its three statements. ENABLE TRIGGER
+      // on a trigger that was never disabled, or that is already enabled, is a no-op, so
+      // this is safe to run no matter which of the three DISABLEs actually landed. A failed
+      // load - or a failed disable - must not leave the database with its invariants
+      // switched off for whoever runs the next migration or the next seed - see the module
+      // comment.
       await enableTriggers(pool);
     }
 
@@ -248,15 +252,19 @@ async function verify(pool: Pool): Promise<VerificationResult[]> {
      WHERE NOT EXISTS (SELECT 1 FROM postings p WHERE p.entry_id = e.id)`,
   );
 
-  // What postings_account_not_overdrawn would have checked: no guarded (asset) account is
-  // ever negative at any prefix of its history. Postgres will not let an aggregate call
-  // (min) wrap a window function call (sum() OVER (...)) directly - 42803, "aggregate
-  // function calls cannot contain window function calls" - so this is two subqueries, not
-  // one: the innermost produces one running-sum row per posting, the middle aggregates that
-  // down to one lowest-point row per account, and the outer counts the accounts where that
-  // point went negative. The same three-level shape as the "establish the invariant" block
-  // in drizzle/0007_overdraft.sql, which the equivalent per-posting trigger query has to use
-  // for the same reason.
+  // What postings_account_not_overdrawn would have checked: no guarded account is ever
+  // negative at any prefix of its history. `guarded_account_types()` (drizzle/0007_overdraft.sql)
+  // is the single source for which types those are - asset today - precisely so this
+  // duplicates the trigger's own filter instead of hard-coding 'asset' a second place that
+  // would go silently stale the day the guarded set grows.
+  //
+  // Postgres will not let an aggregate call (min) wrap a window function call
+  // (sum() OVER (...)) directly - 42803, "aggregate function calls cannot contain window
+  // function calls" - so this is two subqueries, not one: the innermost produces one
+  // running-sum row per posting, the middle aggregates that down to one lowest-point row
+  // per account, and the outer counts the accounts where that point went negative. The same
+  // three-level shape as the "establish the invariant" block in drizzle/0007_overdraft.sql,
+  // which the equivalent per-posting trigger query has to use for the same reason.
   const overdrawn = await pool.query<{ overdrawn: string }>(
     `SELECT count(*) AS overdrawn FROM (
        SELECT prefixes.account_id, min(prefixes.running) AS lowest
@@ -270,7 +278,7 @@ async function verify(pool: Pool): Promise<VerificationResult[]> {
          FROM postings p
          JOIN entries e ON e.id = p.entry_id
          JOIN accounts a ON a.id = p.account_id
-         WHERE a.type = 'asset'
+         WHERE a.type = ANY (public.guarded_account_types())
        ) prefixes
        GROUP BY prefixes.account_id
      ) lowest_per_account WHERE lowest_per_account.lowest < 0`,
