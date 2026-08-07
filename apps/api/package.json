@@ -8,6 +8,7 @@
     "db:migrate": "node --env-file-if-exists=../../.env --import tsx src/db/migrate.ts",
     "checkpoint": "node --env-file-if-exists=../../.env --import tsx scripts/checkpoint.ts",
     "perf:seed": "node --env-file-if-exists=../../.env --import tsx scripts/seed-perf.ts",
+    "perf:explain": "node --env-file-if-exists=../../.env --import tsx scripts/explain.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json"
