@@ -449,6 +449,19 @@ Say plainly that this is the boring option and that it won. Context: `POST /book
 
 Context: 500,000 postings, and the plans in `docs/performance.md` — quote the baseline number for the sum from zero. Decision: `balance_checkpoints(account_id, through_id, ...)`, append-only, refreshed by an explicit call, read by two id-shaped paths. The argument for id over date, in full, as in the schema comment. Consequences: `asOf`, the trial balance and the overdraft scan get nothing from it; nothing schedules the refresh; a stale checkpoint costs time and never correctness; the sum-from-zero path stays, and the agreement property is what makes keeping it worthwhile.
 
+**This ADR is also the permanent home for the watermark race**, and six comments across `schema.ts`, `ledger.repository.ts`, `ledger.service.ts`, `0008_balance_checkpoints.sql` and `checkpoint.race.test.ts` already cite it for exactly that. It must carry:
+
+- Why keying on posting id does **not**, by itself, freeze the summed set. `nextval()` fires at INSERT and is not transactional, so a posting held by an in-flight transaction can carry an id below a watermark computed from committed rows — and once it commits it satisfies `id <= through_id` forever while the delta query looks only at `id > through_id`. The backdating argument for id over date is unaffected and still correct; what fails is a different claim that was resting on it.
+- The two approaches disproved with live probes, each with its counterexample: filtering rows by `xmin` against `pg_snapshot_xmin(pg_current_snapshot())` (xid order and posting-id order are independent, so an older-xid transaction can insert later than an in-flight newer-xid one — and `xid` has no ordering operators anyway), and draining the in-flight list from `pg_snapshot_xip` (that list omits a running transaction whose xid is at or above the snapshot's `xmax`, which derives from the latest *completed* xid).
+- What closes it: the account lock, taken by every write and by `checkpointAccount`. Nothing is inferred; writers are excluded.
+- That `checkpointAccount` refuses to run under `LEDGER_CONCURRENCY_STRATEGY=serializable`, because writers skip the lock there and SSI forms no cycle to abort on — a single rw-antidependency with no return edge.
+
+- [ ] **Step 5b: Amend ADR 0004 — the concurrency-control cost changed**
+
+`docs/adr/0004-concurrency-control.md` argues for keeping the entry-insert critical section narrow, and describes a write path that locks only guarded accounts on negative legs. That is no longer what the code does: every write now locks every account its entry posts to, so that `checkpointAccount` can exclude concurrent writers rather than infer a safe watermark.
+
+Amend it in place — a Consequences addition dated to this stage, not a rewrite of its original argument. It should say what widened, why, what it costs (a deposit can now block and be blocked, where before it never was), and point at 0005 for the race that forced it. Do not quietly edit the original text to look like it always said this.
+
 - [ ] **Step 6: Check the cross-references**
 
 Every ADR that names a file must name one that exists at the path given. Every claim with a number must match `docs/performance.md`.
@@ -472,6 +485,8 @@ git commit -m "docs(adr): the four decisions the record was missing, dated when 
 One section per limitation: what is missing, what it costs today, and what fixing it would take. No hedging, no "in a future version". Cover at least:
 
 - Checkpoint refresh is manual. Nothing schedules it. A stale checkpoint is slower, never wrong.
+- Checkpoints are unavailable under `LEDGER_CONCURRENCY_STRATEGY=serializable`: writers skip the account lock there, so `checkpointAccount` refuses to run rather than write a number it cannot guarantee. Closing that would mean a separate mechanism for that strategy, and nobody has designed one.
+- Every write now locks every account its entry posts to — a cost accepted to make the checkpoint watermark sound, and the reason a deposit can now block another deposit to the same account. See ADR 0004's amendment.
 - `asOf` balances, the trial balance and the overdraft prefix scan cannot use a checkpoint. The last one is the one that runs under a lock — quote the indexed number from `docs/performance.md`.
 - `apps/web` is a stub. Stage 6 shipped the shared contract and the reads a frontend would need; there are no screens.
 - Responses are typed and specified but not parsed at runtime. Tests are the only thing that catches a handler drifting from the spec.
