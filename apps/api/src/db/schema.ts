@@ -201,19 +201,29 @@ export const postings = pgTable(
     // account's row lock held, and then again in the deferred LG004 trigger at COMMIT.
     // `computeCheckpoint`'s refresh scan (`scripts/checkpoint.ts`) runs under the same lock,
     // over the same column, for the same reason. On the 500k-posting perf corpus
-    // (`docs/performance.md`), with this index: `lowest-prefix`'s account-filtered scan
-    // dropped from a Parallel Seq Scan over all 500,000 postings (16,207 buffers) to an
-    // Index Scan touching only the account's own rows (5,692 buffers); the checkpoint delta
-    // sum dropped from 4,247 buffers/15.1ms to 3 buffers/0.04ms; `balance-from-zero` dropped
-    // from 13,678 to 10,018 buffers; `postings-page`'s cursor scan moved off `postings_pkey`
-    // onto this index directly. `lowest-prefix`'s buffer count fell but its wall-clock time
-    // did not - the cheaper postings scan made the planner switch its join with `entries`
-    // from an indexed nested loop to a parallel hash join with a full scan of `entries`,
-    // and that trade lost: 21.4ms baseline to 55.7ms indexed, reproduced across repeated
-    // captures. The index still ships, because three of the four queries it touches improved
-    // and the fourth's regression is a join-order choice the planner made, not a cost this
-    // index itself imposes - but it is not the unqualified win the other three numbers are,
-    // and docs/performance.md says so.
+    // (`docs/performance.md`): `balance-from-zero` dropped from 13,678 buffers/20.8ms to
+    // 10,018 buffers/14.9ms; the checkpoint delta sum dropped from 4,247 buffers/15.1ms to 3
+    // buffers/0.05ms; `postings-page`'s cursor scan moved off `postings_pkey` onto this index
+    // directly, 285 buffers/0.6ms to 258 buffers/0.3ms.
+    //
+    // `lowest-prefix` is the exception, and it is not explained by buffers. Its
+    // account-filtered scan moved from a Parallel Seq Scan (16,207 buffers) to a Parallel
+    // Bitmap Heap Scan on this index (5,692 buffers) - buffers fell on both sides of its join
+    // with `entries` too, postings 6,173 to 2,515 and entries 10,002 to 3,087 - and
+    // wall-clock time still rose, 21.4ms to 57.8ms: the cheaper postings scan led the planner
+    // to replace an indexed nested loop into `entries` with a parallel hash join that
+    // sequentially scans all of `entries`. Forcing the nested loop back on
+    // (`SET enable_hashjoin = off`) resolves it - 16.6ms, faster than the original baseline,
+    // at a *higher* buffer count (12,532) than the losing hash join's. Lowering
+    // `random_page_cost` to 1.1, appropriate for a working set that lives in shared_buffers
+    // as this corpus does, gets the planner to pick the nested loop on its own, no forcing
+    // needed - 17.1ms. So the index is not the cause: both the winning and the losing plan get
+    // cheaper on the postings side because of it, and what decides between them is a
+    // database-wide cost setting, not this index or this schema. Neither setting ships as
+    // part of this migration - that is a separate decision - which means as shipped, under
+    // default planner settings, `lowest-prefix` still runs the regressed hash-join plan. That
+    // gap is open, not resolved; docs/performance.md says so. Buffer counts are not a safe
+    // proxy for lock-hold duration here; wall clock is, and this is the query that proved it.
     //
     // `postings(entry_id)` was measured alongside it and dropped. Indexing a foreign key
     // column is usually about making parent deletes cheap, and nothing in this schema is
