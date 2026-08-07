@@ -64,6 +64,13 @@
       "when": 1786000000000,
       "tag": "0008_balance_checkpoints",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786000100000,
+      "tag": "0009_indexes",
+      "breakpoints": true
     }
   ]
 }
