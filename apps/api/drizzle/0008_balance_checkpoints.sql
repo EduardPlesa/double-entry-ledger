@@ -20,9 +20,9 @@
 -- closes the gap is `LedgerService.checkpointAccount` taking the account's `FOR NO KEY UPDATE`
 -- lock (the same one `postEntry`/`reverseEntry` take) before it reads: with the lock held, no
 -- posting for that account can be mid-insert, so the single read this table's rows are computed
--- from really does describe a closed, final set - under the `row-lock` concurrency strategy.
--- `serializable` does not get this guarantee: writers under it never take the lock, so a
--- checkpoint computed under that strategy can still be wrong in exactly this way.
+-- from really does describe a closed, final set. `checkpointAccount`'s own comment is the one
+-- place that argument, and its `row-lock`-only scope, is stated in full - it refuses to run
+-- under `serializable` rather than write a row it cannot make that guarantee about.
 --
 -- Append-only for ledger_app, by REVOKE, like entries and postings. Deliberately *without*
 -- the owner-binding trigger those tables carry from migration 0003: this table is a cache,

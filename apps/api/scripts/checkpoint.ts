@@ -13,6 +13,7 @@
  */
 import { formatMoney } from '@ledger/shared';
 import { createApplication } from '../src/composition.js';
+import { CheckpointRequiresRowLockError } from '../src/services/ledger.service.js';
 
 const bookId = process.argv[2];
 
@@ -32,6 +33,16 @@ if (bookId === undefined) {
       process.stdout.write(
         `${result.accountId} ${formatMoney(result.balance)} through ${result.throughId.toString()} (${status})\n`,
       );
+    }
+  } catch (error) {
+    // The one refusal this script anticipates: a message telling the operator what to do,
+    // not a stack trace telling them where in the codebase it happened. Anything else is a
+    // bug, and a bug is exactly what should keep its stack trace.
+    if (error instanceof CheckpointRequiresRowLockError) {
+      process.stderr.write(`${error.message}\n`);
+      process.exitCode = 1;
+    } else {
+      throw error;
     }
   } finally {
     // A script that leaves a pool open never exits - see db/migrate.ts for the same rule.
