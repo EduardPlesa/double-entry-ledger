@@ -22,10 +22,19 @@ Every setting relevant to these plans is the Postgres 16 default — none of `sh
 | `shared_buffers` | `128MB` |
 | `work_mem` | `4MB` |
 | `random_page_cost` | `4` |
+| `LEDGER_CONCURRENCY_STRATEGY` | `row-lock` (the application default; not set in `.env` for this capture) |
 
-That last one matters more than a routine default: it is the direct cause of the `lowest-prefix`
-regression below, and it stays at its default because nothing in this task's scope changes a
-database-wide cost constant.
+That `random_page_cost` matters more than a routine default: it is the direct cause of the
+`lowest-prefix` regression below, and it stays at its default because nothing in this task's
+scope changes a database-wide cost constant.
+
+`LEDGER_CONCURRENCY_STRATEGY` matters for a different reason: query 2 (`balance-from-checkpoint`)
+cannot be captured at all under `serializable`. `checkpointAccount` refuses to run outright under
+that strategy (see its own comment and `docs/adr/0005-balance-checkpoints.md` for why the
+`FOR NO KEY UPDATE`-lock guarantee it depends on only holds under `row-lock`), so there is no
+checkpoint for `perf:explain` to read and the run fails loudly with the same
+"has no checkpoint" error an un-checkpointed account produces under any strategy. Every plan in
+this document assumes the default.
 
 ## The corpus
 
@@ -85,6 +94,19 @@ for. A plan captured as the table owner would not include it and would not descr
 Each statement ran three times on the same connection; only the third (warm) run is reported.
 The first run measures the page cache as much as the query. Captured with
 `EXPLAIN (ANALYZE, BUFFERS, VERBOSE false, FORMAT TEXT)`.
+
+**What the harness does to the schema's indexes, and what it leaves behind.**
+`--mode baseline` drops `postings_account_id_id_idx` for the duration of the capture only, so
+the plans above show `postings` as it was before migration `0009`; `--mode indexed` creates it.
+Either way, before the process exits — success or a capture failing partway through —
+`explain.ts`'s own `finally` puts the index back to *present*, matching what `0009` actually
+ships, regardless of which mode ran. Running `--mode baseline` does not leave a development
+database missing an index the rest of the schema assumes is there, and there is no other way to
+recover it: `pnpm db:migrate` marks a migration applied by journal entry, not by re-diffing the
+schema, so it will not replay `0009` just because the index it created is gone from a database
+that already migrated through it. `postings_entry_id_idx` is not created by this script at
+all — it shipped in no migration and no schema (see "measured and dropped" below), and the
+harness that produced the plans in this document does not create a phantom index to match it.
 
 Book `6338abfa-7f72-4bd7-a03e-b57e27e5051f`, account `047086dd-749b-455c-be99-5126194a02e9`
 (2,500 postings), the same account in every baseline and indexed capture below.
@@ -680,16 +702,24 @@ Arithmetic, by hand, from the buffers and `Execution Time` lines pasted above:
   ways. It reads `balance_checkpoints`, a table this migration adds no index to.
 
 - **`postings_entry_id_idx` — measured and dropped.** Task 3's migration originally shipped a
-  second index, `(entry_id)`, alongside the one above; `explain.ts --mode indexed` creates it for
-  every indexed capture, including the ones pasted in this document. It never appears in any plan
-  above — every join from `postings` to `entries`, in all five queries, looks up `entries`'s own
-  primary key (`entries_pkey` / `entries_id_book_id_key`) starting from a `postings` row already
-  in hand; none of the five ever needs to go the other direction and find `postings` rows by
-  `entry_id`. That is the predicted shape for a foreign-key index that exists to make deletes
-  cheap on a table nothing ever deletes from. The index was removed from
-  [`0009_indexes.sql`](../apps/api/drizzle/0009_indexes.sql) and from `schema.ts` before this
-  migration shipped — a null result, recorded here rather than carried forward as a permanent
-  write cost with a story attached.
+  second index, `(entry_id)`, alongside the one above, and it was present for the indexed captures
+  pasted in this document — at the time they were taken, `explain.ts --mode indexed` created it
+  too. It never appears in any plan above — every join from `postings` to `entries`, in all five
+  queries, looks up `entries`'s own primary key (`entries_pkey` / `entries_id_book_id_key`)
+  starting from a `postings` row already in hand; none of the five ever needs to go the other
+  direction and find `postings` rows by `entry_id`. That is the predicted shape for a foreign-key
+  index that exists to make deletes cheap on a table nothing ever deletes from. The index was
+  removed from [`0009_indexes.sql`](../apps/api/drizzle/0009_indexes.sql) and from `schema.ts`
+  before this migration shipped — a null result, recorded here rather than carried forward as a
+  permanent write cost with a story attached. `explain.ts` was subsequently fixed to stop creating
+  it (a harness should not create an index that matches no migration and no schema); to reproduce
+  this null result by hand instead, create it once as the schema owner, capture, then drop it
+  again:
+  ```bash
+  psql "$DATABASE_MIGRATION_URL" -c 'CREATE INDEX postings_entry_id_idx ON postings (entry_id); ANALYZE postings;'
+  pnpm --filter @ledger/api perf:explain --book <bookId> --mode indexed > indexed-with-entry-id.md
+  psql "$DATABASE_MIGRATION_URL" -c 'DROP INDEX postings_entry_id_idx; ANALYZE postings;'
+  ```
 
 - **`lowest-prefix`, under default planner settings, got slower, not faster** — 21.352 ms →
   57.764 ms. This is the one item in this section that is a real regression rather than an
@@ -742,3 +772,17 @@ pnpm --filter @ledger/api perf:explain --book <bookId> --mode indexed > indexed.
 `<bookId>` is printed by `perf:seed`. The first command is required, not optional: `perf:seed`'s
 verification queries are database-wide (see "The corpus" above), so a database holding data from
 an earlier run produces spurious verification failures rather than a clean load.
+
+**What state this leaves your database in.** `--mode baseline` drops `postings_account_id_id_idx`
+only for the duration of its own capture; before either command exits it restores the index to
+present, matching what `0009` ships (see "How the plans were taken" above for why, and for why
+`pnpm db:migrate` cannot do this for you if it's ever missing some other way). Running both
+commands back to back, in either order, leaves the database with `postings_account_id_id_idx`
+present and `postings_entry_id_idx` absent — the same state a plain `pnpm db:migrate` on a fresh
+database produces. Confirm with:
+
+```bash
+psql "$DATABASE_MIGRATION_URL" -c "select indexname from pg_indexes where tablename = 'postings' order by indexname;"
+```
+
+expecting exactly `postings_account_id_id_idx` and `postings_pkey`.
