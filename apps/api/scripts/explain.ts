@@ -64,32 +64,40 @@ async function setIndexState(ownerPool: Pool, mode: Args['mode']): Promise<void>
   await ownerPool.query('ANALYZE postings');
 }
 
-interface HotAccount {
+interface SampleAccount {
   readonly accountId: string;
   readonly postingCount: string;
 }
 
 /**
- * The asset account with the most postings, so the numbers describe the hot case rather than
- * a lucky one. Asset, not any account: it is the type `lowest-prefix`'s overdraft scan
- * actually guards (`guarded_account_types()`, `drizzle/0007_overdraft.sql`), and picking an
- * account that scan never runs for would describe a case the system does not have.
+ * An asset account with the most postings, deterministically. Asset, not any account: it is
+ * the type `lowest-prefix`'s overdraft scan actually guards (`guarded_account_types()`,
+ * `drizzle/0007_overdraft.sql`), and picking an account that scan never runs for would
+ * describe a case the system does not have.
  *
- * This deliberately narrows the plan's own `SELECT account_id FROM postings GROUP BY
- * account_id ORDER BY count(*) DESC LIMIT 1` by joining `accounts` and filtering on type.
- * The seed corpus (`scripts/seed-perf.ts`) splits postings evenly across the 100 asset and
- * 100 revenue accounts - every account ties at the same count - so the unfiltered query
- * would land on whichever Postgres happens to visit first among *all* 200, asset or revenue,
- * and only accidentally on the account the description above actually means.
+ * "The most postings" is not "the busiest account" here, and the distinction matters enough
+ * to spell out. `scripts/seed-perf.ts` distributes asset legs by `n % ASSET_ACCOUNTS` - a
+ * round-robin over a range with no remainder - so all 100 asset accounts tie at exactly 2,500
+ * postings each. There is no busiest one; this is a representative account, chosen from a set
+ * of equals, and the header text built from it says so rather than claiming otherwise.
+ *
+ * `order by count(*) desc, p.account_id asc` - the tiebreaker is load-bearing, not decorative.
+ * Without it, which of the 100 tied accounts wins is whatever order Postgres happens to
+ * produce the `GROUP BY` in, and that order is free to differ between an unindexed baseline
+ * scan and an indexed one - a `Seq Scan` and an `Index Scan` have no reason to visit rows in
+ * the same order. A baseline run and an indexed run picking two different accounts would
+ * still both "work" and would still produce a before/after comparison that lies. `account_id
+ * asc` pins the winner to the same account regardless of mode or of which plan gets chosen to
+ * produce it.
  */
-async function pickHotAccount(client: PoolClient): Promise<HotAccount> {
+async function pickSampleAccount(client: PoolClient): Promise<SampleAccount> {
   const result = await client.query<{ account_id: string; n: string }>(`
     select p.account_id, count(*) as n
     from postings p
     join accounts a on a.id = p.account_id
     where a.type = 'asset'
     group by p.account_id
-    order by count(*) desc
+    order by count(*) desc, p.account_id asc
     limit 1
   `);
 
@@ -309,7 +317,7 @@ async function main(): Promise<void> {
       // next - moot here with a pool of one, but it is the real mechanism being measured.
       await client.query("select set_config('app.current_book_id', $1, true)", [args.bookId]);
 
-      const { accountId, postingCount } = await pickHotAccount(client);
+      const { accountId, postingCount } = await pickSampleAccount(client);
       const throughId = await fetchCheckpointThroughId(client, accountId);
       const cursorId = await pickPageCursor(client, accountId);
 
@@ -317,8 +325,11 @@ async function main(): Promise<void> {
 
       const header =
         `# Query plans - ${args.mode}\n\n` +
-        `Book \`${args.bookId}\`, account \`${accountId}\` - the busiest asset account in it, ` +
-        `${postingCount} postings.\n\n` +
+        `Book \`${args.bookId}\`, account \`${accountId}\`, ${postingCount} postings. The seed ` +
+        'corpus (`scripts/seed-perf.ts`) distributes asset legs evenly across the 100 asset ' +
+        'accounts - all 100 tie at 2,500 postings each - so there is no busiest account to pick; ' +
+        'this one was chosen deterministically from among the tied equals, and the numbers below ' +
+        'describe the typical case rather than a worst one.\n\n' +
         'Captured as `ledger_app` inside a transaction with `app.current_book_id` set, so the ' +
         'row-level security policy (migration 0006) is part of every plan below, the way it is ' +
         'in production. Each plan is the third run of that statement on this connection in this ' +
