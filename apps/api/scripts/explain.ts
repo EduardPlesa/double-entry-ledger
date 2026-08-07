@@ -6,9 +6,25 @@
  * plan captured as the owner would omit it. That is the difference between measuring the
  * system and measuring a query that resembles it.
  *
- * `--mode baseline` drops the stage-7 indexes before capturing; `--mode indexed` creates
- * them. Both run as the owner, since ledger_app cannot alter the schema - which is the point
- * of that split and not an inconvenience.
+ * What this does to your database - read this before running it. `--mode baseline` drops
+ * `postings_account_id_id_idx` for the duration of the capture, so the plans show what
+ * `postings` looked like before migration 0009; `--mode indexed` creates it. Either way,
+ * before this process exits - normal completion or a capture failing partway through, via
+ * the `finally` in `main` - the index is put back to *present*, matching what 0009 actually
+ * ships, regardless of which mode ran. A `--mode baseline` run never leaves your database
+ * missing an index the rest of the schema assumes is there, and `pnpm db:migrate` cannot put
+ * it back for you: Drizzle marks a migration applied by journal entry, not by re-diffing the
+ * schema, so it will not replay 0009 just because the index it created is gone.
+ * `postings_entry_id_idx` is not touched at all - it shipped nowhere (see
+ * docs/performance.md, "measured and dropped"), and a harness that still created it would
+ * leave a phantom index matching no migration and no schema, which is the same class of bug
+ * this comment exists to prevent, just for the other index. If you want that null result
+ * reproduced by hand, docs/performance.md's "Reproducing it" section says how.
+ * `ANALYZE postings` runs after every change, so the planner's statistics always match
+ * whatever state the table is actually in.
+ *
+ * Both index changes run as the owner, since ledger_app cannot alter the schema - which is
+ * the point of the role split and not an inconvenience.
  *
  * Every SQL string below is what `src/repositories/ledger.repository.ts` actually hands to
  * Postgres, confirmed with `.toSQL()` rather than typed from the method name - `sumPostings`
@@ -42,23 +58,27 @@ function parseArgs(argv: readonly string[]): Args {
 }
 
 /**
- * Drops or creates the stage-7 indexes, as the owner - ledger_app cannot alter the schema,
- * which is the point of the role split and not an inconvenience here. The names match what
- * Task 3's migration creates exactly, because this is the harness that measured them.
+ * Sets `postings_account_id_id_idx` - the one index migration 0009 ships - present or
+ * absent, as the owner. The name matches what 0009 creates exactly, because this is the
+ * harness that measured it. `postings_entry_id_idx` is never mentioned here; see the module
+ * comment for why touching it at all would be a bug.
  *
- * `ANALYZE` runs after either change so the planner is choosing with this mode's statistics
- * rather than the other mode's - see `scripts/seed-perf.ts`'s own `analyze` for the same rule
+ * `present: false` is a *temporary* state for the duration of one baseline capture, not a
+ * mode this script leaves the database in - `main`'s `finally` always calls this again with
+ * `present: true` before exiting, so a `--mode baseline` run's caller never has to remember
+ * to put the index back themselves.
+ *
+ * `ANALYZE` runs after every change so the planner is choosing with this call's statistics
+ * rather than a stale set - see `scripts/seed-perf.ts`'s own `analyze` for the same rule
  * applied to a fresh load.
  */
-async function setIndexState(ownerPool: Pool, mode: Args['mode']): Promise<void> {
-  if (mode === 'baseline') {
-    await ownerPool.query('DROP INDEX IF EXISTS postings_account_id_id_idx');
-    await ownerPool.query('DROP INDEX IF EXISTS postings_entry_id_idx');
-  } else {
+async function setIndexState(ownerPool: Pool, present: boolean): Promise<void> {
+  if (present) {
     await ownerPool.query(
       'CREATE INDEX IF NOT EXISTS postings_account_id_id_idx ON postings (account_id, id)',
     );
-    await ownerPool.query('CREATE INDEX IF NOT EXISTS postings_entry_id_idx ON postings (entry_id)');
+  } else {
+    await ownerPool.query('DROP INDEX IF EXISTS postings_account_id_id_idx');
   }
 
   await ownerPool.query('ANALYZE postings');
@@ -306,7 +326,7 @@ async function main(): Promise<void> {
   const appPool = new Pool({ connectionString: config.database.url, max: 1 });
 
   try {
-    await setIndexState(ownerPool, args.mode);
+    await setIndexState(ownerPool, args.mode === 'indexed');
 
     const client = await appPool.connect();
     try {
@@ -352,6 +372,11 @@ async function main(): Promise<void> {
       client.release();
     }
   } finally {
+    // Always leave the index the way migration 0009 ships it, whatever mode this run
+    // captured and whether or not the capture itself succeeded - see the module comment.
+    // A --mode baseline run's whole point is to drop this index temporarily; it must not
+    // also be the reason it's still missing after the process exits.
+    await setIndexState(ownerPool, true);
     await ownerPool.end();
     await appPool.end();
   }
