@@ -245,7 +245,7 @@ export const postings = pgTable(
  * this on its own - filtering by each posting's `xmin` against a snapshot boundary, and
  * draining every transaction a snapshot's `xip_list` named before recomputing - were each
  * disproved with a reproducible counter-example; see
- * `.superpowers/sdd/2026-08-06-stage-7-checkpoints/final-review-fix-report.md`. What actually
+ * `docs/adr/0005-balance-checkpoints.md`. What actually
  * freezes the set is `LedgerService.checkpointAccount` holding the account's `FOR NO KEY
  * UPDATE` lock - the same one `postEntry`/`reverseEntry` take - for the duration of the read:
  * with it held, no posting for this account can be mid-insert, so the row this method computes
