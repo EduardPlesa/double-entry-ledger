@@ -195,34 +195,35 @@ export const postings = pgTable(
       foreignColumns: [accounts.id, accounts.bookId, accounts.currency],
     }),
 
-    // Deliberately no index on (account_id, id) or on entry_id yet. Stage 7 adds them with
-    // EXPLAIN ANALYZE either side to show what they buy. Indexing a foreign key column is
-    // usually about making parent deletes cheap, and in this schema nothing is ever deleted.
+    // Stage 7 measured this rather than assuming it. `postings(account_id, id)` is not
+    // primarily a read-path index; its hottest consumer is the overdraft prefix scan
+    // (`lowestPrefixBalance`), which runs inside the entry-insert critical section with the
+    // account's row lock held, and then again in the deferred LG004 trigger at COMMIT.
+    // `computeCheckpoint`'s refresh scan (`scripts/checkpoint.ts`) runs under the same lock,
+    // over the same column, for the same reason. On the 500k-posting perf corpus
+    // (`docs/performance.md`), with this index: `lowest-prefix`'s account-filtered scan
+    // dropped from a Parallel Seq Scan over all 500,000 postings (16,207 buffers) to an
+    // Index Scan touching only the account's own rows (5,692 buffers); the checkpoint delta
+    // sum dropped from 4,247 buffers/15.1ms to 3 buffers/0.04ms; `balance-from-zero` dropped
+    // from 13,678 to 10,018 buffers; `postings-page`'s cursor scan moved off `postings_pkey`
+    // onto this index directly. `lowest-prefix`'s buffer count fell but its wall-clock time
+    // did not - the cheaper postings scan made the planner switch its join with `entries`
+    // from an indexed nested loop to a parallel hash join with a full scan of `entries`,
+    // and that trade lost: 21.4ms baseline to 55.7ms indexed, reproduced across repeated
+    // captures. The index still ships, because three of the four queries it touches improved
+    // and the fourth's regression is a join-order choice the planner made, not a cost this
+    // index itself imposes - but it is not the unqualified win the other three numbers are,
+    // and docs/performance.md says so.
     //
-    // These were described here as read-path indexes, and stage 4 made that false of the
-    // first one. The overdraft rule reads every prefix of an account's history, so
-    // `lowestPrefixBalance` scans this table with no index to scan it by - a sequential scan
-    // of *all* postings, not of the account's - and it runs inside the critical section, with
-    // the account's row lock held. Then the deferred LG004 trigger runs the same scan again at
-    // COMMIT, once per inserted guarded posting, still inside that window. `postings(account_id)`
-    // is now a write-path index on the hottest lock in the system, and its absence is a known
-    // cost being carried on purpose rather than an oversight: it stays stage 7's work, where
-    // it is measured, alongside the balance-checkpoint question it belongs with. See
-    // docs/adr/0004-concurrency-control.md.
-    //
-    // This plan added a second reader of the same shape: `computeCheckpoint` sums
-    // `postings` by `account_id` to refresh a checkpoint, triggered from `scripts/checkpoint.ts`
-    // rather than the write path, but over the same unindexed column. The index does not
-    // exist yet - it is still the other plan's work - but when it lands, the checkpoint
-    // read is one of the queries it gets measured against, not only the overdraft scan.
-    //
-    // It is a write-path-shaped read now too, not only an unindexed one. Making the watermark
-    // this computes safe against a concurrent insert turned out to need the account's
-    // `FOR NO KEY UPDATE` lock - see `balanceCheckpoints`'s comment for why - so
-    // `computeCheckpoint`'s scan runs with that same lock held, exactly like
-    // `lowestPrefixBalance`'s above. Triggered from a maintenance script rather than from
-    // `postEntry` does not exempt it from this: for the account being checkpointed, it is the
-    // same critical section, for as long as the scan takes.
+    // `postings(entry_id)` was measured alongside it and dropped. Indexing a foreign key
+    // column is usually about making parent deletes cheap, and nothing in this schema is
+    // ever deleted; without that, nothing here reads `postings` by `entry_id` either - every
+    // join to `entries` looks up `entries`'s own primary key from a `postings` row already in
+    // hand, never the reverse - and across all five queries' `EXPLAIN (ANALYZE, BUFFERS)`
+    // output, on both a fresh capture and a repeat, no plan ever named it. An index nobody
+    // measured a use for is a permanent write cost with a story attached; this one's story
+    // didn't hold up, so it isn't here. The null result is in docs/performance.md.
+    index('postings_account_id_id_idx').on(t.accountId, t.id),
   ],
 );
 

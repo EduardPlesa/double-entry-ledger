@@ -1,0 +1,25 @@
+-- The index stage 1 deferred until it could be measured, and the one that measurement
+-- showed was not earning its keep.
+--
+-- `postings (account_id, id)` is not primarily a read-path index, and the comment in
+-- schema.ts that once called it one was wrong. Its hottest consumer is the overdraft prefix
+-- scan, which runs inside the entry-insert critical section with the account's row lock
+-- held, and then again in the deferred trigger at COMMIT. Both were sequential scans of
+-- every posting in the table: on the 500k-posting perf corpus, `lowest-prefix`'s
+-- account-filtered scan went from a Parallel Seq Scan (16,207 buffers) to an Index Scan on
+-- this index (5,692 buffers), though its wall-clock time rose (21.4ms to 55.7ms) because the
+-- cheaper postings scan led the planner to a worse join with `entries` - a planner choice,
+-- not a cost this index imposes, and still a net win on buffers touched under the account's
+-- lock; `balance-from-zero` went from 13,678 buffers/20.8ms to 10,018 buffers/13.9ms; the
+-- checkpoint delta sum went from 4,247 buffers/15.1ms to 3 buffers/0.04ms; `postings-page`'s
+-- cursor scan went from `postings_pkey` (285 buffers/0.6ms) to this index directly (258
+-- buffers/0.3ms). See docs/performance.md for the plans either side.
+--
+-- `postings (entry_id)` was written here too and measured on the same five queries. It was
+-- dropped: no plan among the five ever scanned `postings` by `entry_id` - every join to
+-- `entries` looks up `entries`'s own primary key from a `postings` row already in hand, never
+-- the other direction - so the index bought nothing and was removed before this migration
+-- shipped. The null result is recorded in docs/performance.md rather than carried as a write
+-- cost with a story attached.
+
+CREATE INDEX postings_account_id_id_idx ON postings ("account_id", "id");
