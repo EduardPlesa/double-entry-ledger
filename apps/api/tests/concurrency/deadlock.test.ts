@@ -10,18 +10,25 @@ import { balanceOf, seedBookIn, setBookContext, type Book } from '../helpers/led
 import { createService } from '../helpers/service.js';
 
 /**
- * Two entries, two guarded accounts, opposite leg order - posted through the service, end to
- * end.
+ * Two entries, several shared accounts, opposite leg order - posted through the service, end
+ * to end.
  *
  * Without something forcing a consistent lock order, one transaction would hold cash and want
  * bank while the other holds bank and wants cash, and Postgres breaks the tie by killing one
  * of them with a 40P01. There are two things in this codebase that could be that something:
- * `guardedAccountsAtRisk` sorts the ids in JavaScript before `postEntry` ever calls
- * `lockAccounts`, and `lockAccounts` itself emits `ORDER BY id` in its SQL. This test goes
- * through the service, so every call it makes is already sorted by the time it reaches
- * `lockAccounts` - it is the JS sort this test exercises, not the SQL clause. A direct test
- * below calls `repository.lockAccounts` itself, bypassing the JS sort, to reach the code path
- * this one cannot.
+ * `accountsTouched` sorts the ids in JavaScript before `postEntry` ever calls `lockAccounts`,
+ * and `lockAccounts` itself emits `ORDER BY id` in its SQL. This test goes through the service,
+ * so every call it makes is already sorted by the time it reaches `lockAccounts` - it is the
+ * JS sort this test exercises, not the SQL clause. A direct test below calls
+ * `repository.lockAccounts` itself, bypassing the JS sort, to reach the code path this one
+ * cannot.
+ *
+ * `accountsTouched` is the whole reason this file's coverage needed a second look after the
+ * checkpoint fix: it locks every account an entry posts to, not only the guarded ones losing
+ * money, so `drain` below - which always had a third, unguarded, positive leg on `rent` - now
+ * locks three accounts per call instead of two. This test's own sort discipline was never
+ * exercised past a pair before; it is now, on every run, without needing a dedicated fixture
+ * for it.
  *
  * A deadlock here would surface as a rejection carrying SQLSTATE 40P01, which is why the
  * assertion is about the error codes and not only about the balances.
@@ -101,7 +108,7 @@ function describeReason(reason: unknown): string {
   return String(reason);
 }
 
-describe('two entries locking the same pair of accounts', () => {
+describe('two entries locking the same three accounts', () => {
   it('does not deadlock when the legs arrive in opposite orders', async () => {
     const book = await seedBookIn(pool);
     await fundBothAccounts(book);
@@ -121,35 +128,45 @@ describe('two entries locking the same pair of accounts', () => {
 });
 
 /**
- * The case the test above structurally cannot reach, and the one that was actually broken.
+ * The case that was actually broken when this test was written, and a case whose own mechanism
+ * has since moved - the history is worth keeping honest rather than pretending the scenario
+ * below still exercises what it first caught.
  *
- * Both entries there drain *both* accounts, so both accounts land in both at-risk sets and
- * both transactions lock the pair in the same sorted order. Every account either side touches
- * is an account it holds an explicit lock on, so the only ordering that could go wrong is one
- * `guardedAccountsAtRisk` has already fixed.
+ * `transfer(from, to)` is two legs: `from -1`, `to +1`. At the time this test was added, only
+ * the negative leg's account was locked - `[cash -1, bank +1]` put `cash` in the lock set and
+ * left `bank` out of it, but the transaction still *wrote* a posting to `bank`, and inserting
+ * that posting made Postgres check `postings_account_same_book_currency_fk` against the parent
+ * row as `SELECT 1 FROM accounts WHERE id = bank ... FOR KEY SHARE`. That was a lock this code
+ * never asked for, never sorted, and never knew it was taking. Under `FOR UPDATE` - which
+ * conflicts with `FOR KEY SHARE` - the mirrored entry `[bank -1, cash +1]` held `bank`
+ * explicitly and waited on `cash` implicitly, this one held `cash` and waited on `bank`, and
+ * Postgres broke the tie with a 40P01. `withRetry` deliberately does not retry a deadlock and
+ * nothing translates it, so the loser of a perfectly legitimate transfer received a raw driver
+ * error and an HTTP 500. `FOR NO KEY UPDATE` was what fixed it: it still conflicts with itself,
+ * so two concurrent withdrawals from one account serialise exactly as before, but it does not
+ * conflict with the `FOR KEY SHARE` a foreign key check takes, so the FK check and the
+ * concurrent deposit passed straight through.
  *
- * A crossed transfer is different, and the difference is the whole finding. `[cash -1, bank
- * +1]` puts only `cash` in the at-risk set, so `lockAccountsAtRisk` locks `cash` and nothing
- * else - but the transaction still *writes* a posting to `bank`, and inserting that posting
- * makes Postgres check `postings_account_same_book_currency_fk` against the parent row as
- * `SELECT 1 FROM accounts WHERE id = bank ... FOR KEY SHARE`. That is a lock this code never
- * asked for, never sorted, and never knew it was taking. Under `FOR UPDATE` - which conflicts
- * with `FOR KEY SHARE` - the mirrored entry `[bank -1, cash +1]` holds `bank` and waits for
- * `cash`, this one holds `cash` and waits for `bank`, and Postgres breaks the tie with a
- * 40P01. `withRetry` deliberately does not retry a deadlock and nothing translates it, so the
- * loser of a perfectly legitimate transfer received a raw driver error and an HTTP 500.
+ * `accountsTouched` widened the lock set to every account a leg names, guarded or not,
+ * negative or not - see `ledger.service.ts`'s comment on `lockTouchedAccounts` for why. Under
+ * that set, `[cash -1, bank +1]` locks *both* `cash` and `bank` explicitly, and so does the
+ * mirrored `[bank -1, cash +1]` - both sides now lock the identical pair, sorted, before either
+ * ever reaches an insert. Neither side is relying on the other's implicit `FOR KEY SHARE`
+ * anymore, so this specific scenario is, structurally, the same "two entries, one shared set,
+ * sorted the same way" case the very first test in this file covers - not the asymmetric one
+ * this comment used to describe.
  *
- * `FOR NO KEY UPDATE` is what makes this pass. It still conflicts with itself, so two
- * concurrent withdrawals from one account serialise exactly as before - which is the entire
- * purpose of the lock and what `overdraft.race.test.ts` measures - but it does not conflict
- * with the `FOR KEY SHARE` a foreign key check takes, so the FK checks and the concurrent
- * deposits pass straight through.
+ * `FOR NO KEY UPDATE` is still the mode, and this test - unchanged, still passing - is still
+ * useful evidence that widening the lock set did not quietly reintroduce the deadlock it was
+ * chosen to fix. What it no longer does is exercise the *reason* the mode still matters: that
+ * moved to `checkpointAccount`, which takes only one account's lock, on its own, and still
+ * must not conflict with a concurrent `FOR KEY SHARE` from an unrelated FK check - see the
+ * `checkpointAccount` describe block below, which is this test's replacement for that specific
+ * purpose.
  *
- * Several rounds rather than one. The deadlock needs both sides to have taken their explicit
- * lock before either reaches the other's foreign key check, and while that overlap is easy to
- * hit it is not guaranteed on any single pair. Against `.for('update')` this reproduced a
- * genuine 40P01 within the first two rounds; the loop is what makes it evidence rather than
- * an anecdote.
+ * Several rounds rather than one, kept from the original test: cheap insurance against a
+ * regression that only shows up under a particular interleaving, even though the specific
+ * interleaving this was written to force no longer applies.
  */
 describe('two crossed transfers between the same pair of accounts', () => {
   it('does not deadlock when one entry is the mirror of the other', async () => {
@@ -182,7 +199,7 @@ describe('two crossed transfers between the same pair of accounts', () => {
 describe('lockAccounts called directly, bypassing the JS sort', () => {
   /**
    * The test above can never see what `lockAccounts`'s own `ORDER BY id` does by itself,
-   * because `guardedAccountsAtRisk` always hands it an already-sorted list - the ids it
+   * because `accountsTouched` always hands it an already-sorted list - the ids it
    * receives there are never out of order to begin with. This test closes that gap: it calls
    * `repository.lockAccounts` directly, from two separate connections, each handed the same
    * two account ids in the opposite order from the other.
@@ -247,12 +264,92 @@ describe('lockAccounts called directly, bypassing the JS sort', () => {
 });
 
 /**
- * `sqlStatesOf` is what makes the three deadlock assertions above mean anything - a helper
- * that silently returned `[]` for every rejection would let `not.toContain('40P01')` pass
- * whether or not a deadlock occurred. This checks it against a real rejection from this same
- * driver stack, not against a hand-built error shape, so a change to how drizzle wraps
- * node-postgres errors would be caught here rather than by every deadlock test going blind
- * at once.
+ * `checkpointAccount` locking the account it reads is the change this file exists to guard
+ * now, and it carries a different shape of risk than the write-path widening above: it takes
+ * exactly one lock, on its own, never asks for a second one, and therefore cannot itself be a
+ * participant in a wait cycle - a transaction can only deadlock by holding something another
+ * transaction is waiting for, and this one never holds anything past the single row it locks
+ * up front. That is a property of the code, not something a test can additionally prove by
+ * running it enough times; what these two tests cover instead is the two concrete interactions
+ * that widening created, both of which were absent before this change existed to check.
+ */
+describe('checkpointAccount locking the account it reads', () => {
+  const ROUNDS = 3;
+
+  /**
+   * `checkpointAccount(cash)` against a `postEntry` that also touches `cash`, fired together.
+   *
+   * Before this change, `checkpointAccount` took no lock at all, so there was nothing here to
+   * test - a checkpoint and a write to the same account never contended for anything. Now both
+   * take `FOR NO KEY UPDATE` on `cash`, and the only two acceptable outcomes are: the write
+   * gets there first and the checkpoint waits, or the checkpoint gets there first and the write
+   * waits. Either is a block, never a 40P01, because `checkpointAccount` cannot be one side of
+   * a cycle. The `transfer` entry also touches `bank`, so this exercises the write path holding
+   * two locks (sorted) while the checkpoint holds one on the account they share.
+   */
+  it('does not deadlock against a concurrent write to the same account', async () => {
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      const book = await seedBookIn(pool);
+      await fundBothAccounts(book);
+
+      const settled = await Promise.allSettled([
+        service.postEntry(book.bookId, transfer(book.cash, book.bank)),
+        service.checkpointAccount(book.bookId, book.cash),
+      ]);
+
+      const codes = sqlStatesOf(settled);
+      expect(codes, `round ${round.toString()} deadlocked`).not.toContain('40P01');
+      expect(
+        settled.every((result) => result.status === 'fulfilled'),
+        `round ${round.toString()} rejected: ${JSON.stringify(codes)}`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * `checkpointAccount(cash)` against `createAccount` inserting a *new* account whose
+   * `parent_id` is `cash`, fired together.
+   *
+   * This is the scenario `FOR NO KEY UPDATE` is for now, in the sense that matters for new
+   * code rather than history: `checkpointAccount` explicitly locks `cash` with it, and
+   * `createAccount`'s insert implicitly takes `FOR KEY SHARE` on the same row for
+   * `accounts_parent_same_book_fk`'s check - a lock `createAccount` never asks for by name and
+   * this test never orders, the same shape the old crossed-transfer scenario was before the
+   * write path widened. `FOR UPDATE` would conflict with that `FOR KEY SHARE` and could
+   * deadlock a maintenance read against an unrelated account-tree write; `FOR NO KEY UPDATE`
+   * does not conflict with it, so both proceed.
+   */
+  it('does not deadlock against a concurrent child-account insert under the same parent', async () => {
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      const book = await seedBookIn(pool);
+      await fundBothAccounts(book);
+
+      const settled = await Promise.allSettled([
+        service.checkpointAccount(book.bookId, book.cash),
+        service.createAccount(book.bookId, {
+          name: `child of cash, round ${round.toString()}`,
+          type: 'asset',
+          currency: 'EUR',
+          parentId: book.cash,
+        }),
+      ]);
+
+      const codes = sqlStatesOf(settled);
+      expect(codes, `round ${round.toString()} deadlocked`).not.toContain('40P01');
+      expect(
+        settled.every((result) => result.status === 'fulfilled'),
+        `round ${round.toString()} rejected: ${JSON.stringify(codes)}`,
+      ).toBe(true);
+    }
+  });
+});
+
+/**
+ * `sqlStatesOf` is what makes the deadlock assertions above mean anything - a helper that
+ * silently returned `[]` for every rejection would let `not.toContain('40P01')` pass whether
+ * or not a deadlock occurred. This checks it against a real rejection from this same driver
+ * stack, not against a hand-built error shape, so a change to how drizzle wraps node-postgres
+ * errors would be caught here rather than by every deadlock test going blind at once.
  */
 describe('sqlStatesOf', () => {
   it('recovers a real SQLSTATE from a drizzle-wrapped driver error', async () => {

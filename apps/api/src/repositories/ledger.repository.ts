@@ -488,10 +488,19 @@ export class DrizzleLedgerRepository implements LedgerRepository {
   /**
    * The watermark and the sum, from one statement and therefore from one snapshot.
    *
-   * Two statements would be a bug with a narrow window and a permanent consequence: a
-   * posting committed between them lands above the watermark this reads and below the sum
-   * that reads it, and every balance served from the resulting checkpoint is short by
-   * exactly that posting until a later checkpoint supersedes it.
+   * One statement keeps the watermark and the sum from tearing apart from each other: two
+   * separate reads would let a posting committed between them land above the watermark this
+   * reads and below the sum that reads it. That is necessary but was proven, twice, not
+   * sufficient on its own - see the caller, `LedgerService.checkpointAccount`, and the report
+   * at `.superpowers/sdd/2026-08-06-stage-7-checkpoints/final-review-fix-report.md` for the
+   * two counter-examples. `postings.id` is a bigserial handed out by a non-transactional
+   * `nextval()` at INSERT time, not at COMMIT, so id order and commit order can disagree; a
+   * single consistent snapshot of `postings` alone cannot tell "no writer for this account is
+   * mid-insert right now" from "one is, and I simply can't see its uncommitted row yet" - the
+   * two are indistinguishable from in here. What actually makes that true is the caller holding
+   * `FOR NO KEY UPDATE` on the account before this runs: with the lock held, nothing can be
+   * mid-insert for it, and only then does "one statement, one snapshot" describe a closed set
+   * rather than an open one this method has no way to detect from the inside.
    */
   async computeCheckpoint(executor: Executor, accountId: string): Promise<ComputedCheckpoint> {
     const [row] = await executor
@@ -588,31 +597,44 @@ export class DrizzleLedgerRepository implements LedgerRepository {
   }
 
   /**
-   * Row locks on the accounts an entry could overdraw.
+   * Row locks on accounts: every one an entry posts to, from `postEntry` and `reverseEntry`, or
+   * the single account a checkpoint is being computed for, from `checkpointAccount`.
    *
    * The lock is on `accounts`, not on `postings`, and that is the point: the rows being
    * inserted do not exist yet, so there is nothing there to lock. The account row is a
    * pre-existing thing every writer to that account has to go through, which turns "check
-   * then insert" into a decision only one transaction can be making at a time.
+   * then insert" - or, for a checkpoint, "read the watermark while nothing can add to it" -
+   * into a decision only one transaction can be making at a time.
    *
-   * `FOR NO KEY UPDATE`, and the choice of mode is load-bearing rather than cautious. Only the
-   * accounts an entry takes money *out* of are locked here, but an entry writes postings to
-   * every account it touches, and inserting a posting makes Postgres verify
-   * `postings_account_same_book_currency_fk` against the parent row - which it does by taking
-   * `FOR KEY SHARE` on that `accounts` row. That is a lock this code never requests and never
-   * gets to order. `FOR UPDATE` conflicts with `FOR KEY SHARE`, so under it a transfer of
-   * `[cash -1, bank +1]` held `cash` explicitly and then waited on `bank` implicitly, while
-   * the mirrored `[bank -1, cash +1]` did the reverse, and Postgres broke the tie with a
-   * 40P01 on a pair of entirely legitimate transfers. `FOR NO KEY UPDATE` still conflicts with
-   * itself - two withdrawals from one account serialise exactly as before, which is the only
-   * thing the lock is here to do - but it does not conflict with `FOR KEY SHARE`, so foreign
-   * key checks and concurrent deposits pass straight through. The crossed-transfer test in
-   * `tests/concurrency/deadlock.test.ts` is the before-and-after: it reproduces a real 40P01
-   * against `for update` and passes against this.
+   * `FOR NO KEY UPDATE`, and the choice of mode is load-bearing rather than cautious, for two
+   * reasons that arrived at different times.
    *
-   * Two entries touching the same two accounts in opposite leg order must not take the locks
+   * The original: only the accounts an entry took money *out* of used to be locked here, while
+   * inserting *any* posting takes an implicit `FOR KEY SHARE` on its account row, for
+   * `postings_account_same_book_currency_fk`'s check against the parent - a lock this code
+   * never requested and never got to order. `FOR UPDATE` conflicts with `FOR KEY SHARE`, so
+   * under it a transfer of `[cash -1, bank +1]` held `cash` explicitly and then waited on
+   * `bank` implicitly, while the mirrored `[bank -1, cash +1]` did the reverse, and Postgres
+   * broke the tie with a 40P01 on a pair of entirely legitimate transfers.
+   *
+   * Locking every account an entry posts to - not only the negative-guarded ones - closed that
+   * particular asymmetry from the inside: both sides of a transfer now hold both accounts
+   * explicitly, in the same sorted order, so neither is waiting on an FK check it does not
+   * already hold the lock for. `FOR NO KEY UPDATE` stayed the mode anyway, because a second
+   * reason for it arrived alongside the widening: `checkpointAccount` now takes this same lock
+   * on one account, on its own, outside any entry - and it must not conflict with the
+   * `FOR KEY SHARE` a concurrent, unrelated FK check takes on that same row, such as a new
+   * child account's `accounts_parent_same_book_fk`. `FOR UPDATE` would turn a maintenance read
+   * into something that fights ordinary traffic it has no business fighting. `FOR NO KEY
+   * UPDATE` still conflicts with itself - two withdrawals from one account, or a withdrawal and
+   * a checkpoint, still serialise, which is the only thing this lock is here to do - but it
+   * lets foreign key checks and concurrent deposits pass straight through. The tests in
+   * `tests/concurrency/deadlock.test.ts` cover both the asymmetric case this closed and the
+   * ordinary same-order case that remains.
+   *
+   * Two callers touching the same accounts in opposite leg order must not take the locks
    * in opposite orders, or they wait on each other forever. Two things stand between this
-   * method and that failure. `guardedAccountsAtRisk`, in the service, sorts the ids before
+   * method and that failure. `accountsTouched`, in the service, sorts the ids before
    * they ever reach here - every caller this method actually has always hands it ids already
    * in ascending order, and that is the mechanism the end-to-end test in
    * `tests/concurrency/deadlock.test.ts` exercises. `ORDER BY id` below is this method's own,
