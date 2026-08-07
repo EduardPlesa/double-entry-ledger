@@ -211,10 +211,18 @@ export const postings = pgTable(
     // docs/adr/0004-concurrency-control.md.
     //
     // This plan added a second reader of the same shape: `computeCheckpoint` sums
-    // `postings` by `account_id` to refresh a checkpoint, from `scripts/checkpoint.ts`
+    // `postings` by `account_id` to refresh a checkpoint, triggered from `scripts/checkpoint.ts`
     // rather than the write path, but over the same unindexed column. The index does not
     // exist yet - it is still the other plan's work - but when it lands, the checkpoint
     // read is one of the queries it gets measured against, not only the overdraft scan.
+    //
+    // It is a write-path-shaped read now too, not only an unindexed one. Making the watermark
+    // this computes safe against a concurrent insert turned out to need the account's
+    // `FOR NO KEY UPDATE` lock - see `balanceCheckpoints`'s comment for why - so
+    // `computeCheckpoint`'s scan runs with that same lock held, exactly like
+    // `lowestPrefixBalance`'s above. Triggered from a maintenance script rather than from
+    // `postEntry` does not exempt it from this: for the account being checkpointed, it is the
+    // same critical section, for as long as the scan takes.
   ],
 );
 
@@ -224,14 +232,32 @@ export const postings = pgTable(
  * `through_id` and not a date, and the difference is the whole reason this table exists. A
  * checkpoint asserts the sum over postings with `id <= through_id`. `postings.id` is a
  * bigserial assigned at insert, so an entry backdated in `occurred_at` still receives ids
- * above everything already stored: the set this row summed is frozen the moment it is
- * written, and no later insert can enter it.
+ * above everything already stored: no later-recorded entry can retroactively enter the set
+ * this row summed just by describing an earlier time. That argument is about backdating and
+ * it still holds - see docs/adr/0005-balance-checkpoints.md - but it is not, on its own, the
+ * reason the set is frozen.
+ *
+ * The actual reason is a lock, not a property of `postings.id` alone. `nextval()` fires at
+ * INSERT time, not at COMMIT, and is not transactional, so a posting can draw an id below a
+ * watermark while its transaction is still open - and if that transaction commits after the
+ * checkpoint is written, its posting sits below `through_id` forever with nothing having
+ * summed it. Two designs that tried to make `computeCheckpoint`'s single read safe against
+ * this on its own - filtering by each posting's `xmin` against a snapshot boundary, and
+ * draining every transaction a snapshot's `xip_list` named before recomputing - were each
+ * disproved with a reproducible counter-example; see
+ * `.superpowers/sdd/2026-08-06-stage-7-checkpoints/final-review-fix-report.md`. What actually
+ * freezes the set is `LedgerService.checkpointAccount` holding the account's `FOR NO KEY
+ * UPDATE` lock - the same one `postEntry`/`reverseEntry` take - for the duration of the read:
+ * with it held, no posting for this account can be mid-insert, so the row this method computes
+ * really is final the moment it is written, under the `row-lock` concurrency strategy.
+ * `serializable` writers never take that lock, so a checkpoint computed under that strategy
+ * carries no such guarantee.
  *
  * A checkpoint keyed on `occurred_at <= D` would assert a sum over a set that is *not*
- * frozen. An entry recorded tomorrow, describing last March, lands inside it - and the
- * stored number is then wrong with nothing in the row to say so. Invalidating it correctly
- * means comparing every entry's `recorded_at` against every checkpoint's date, which is
- * bitemporal bookkeeping and a different system. See docs/adr/0005-balance-checkpoints.md.
+ * frozen even with the lock, for a different reason: an entry recorded tomorrow, describing
+ * last March, lands inside it - and the stored number is then wrong with nothing in the row to
+ * say so. Invalidating it correctly means comparing every entry's `recorded_at` against every
+ * checkpoint's date, which is bitemporal bookkeeping and a different system.
  *
  * The same asymmetry bounds what this can accelerate: `asOf` balances and the trial balance
  * filter on `occurred_at`, and `lowestPrefixBalance` is a minimum over prefixes that a
