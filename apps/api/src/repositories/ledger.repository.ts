@@ -491,9 +491,8 @@ export class DrizzleLedgerRepository implements LedgerRepository {
    * One statement keeps the watermark and the sum from tearing apart from each other: two
    * separate reads would let a posting committed between them land above the watermark this
    * reads and below the sum that reads it. That is necessary but was proven, twice, not
-   * sufficient on its own - see the caller, `LedgerService.checkpointAccount`, and the report
-   * at `.superpowers/sdd/2026-08-06-stage-7-checkpoints/final-review-fix-report.md` for the
-   * two counter-examples. `postings.id` is a bigserial handed out by a non-transactional
+   * sufficient on its own - see `LedgerService.checkpointAccount` and
+   * `docs/adr/0005-balance-checkpoints.md` for the two counter-examples. `postings.id` is a bigserial handed out by a non-transactional
    * `nextval()` at INSERT time, not at COMMIT, so id order and commit order can disagree; a
    * single consistent snapshot of `postings` alone cannot tell "no writer for this account is
    * mid-insert right now" from "one is, and I simply can't see its uncommitted row yet" - the

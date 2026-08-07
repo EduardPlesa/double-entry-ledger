@@ -16,7 +16,7 @@
 -- posting's `xmin` against a snapshot boundary, and draining every transaction a snapshot's
 -- `xip_list` named before recomputing - were each disproved with a reproducible
 -- counter-example rather than shipped; see
--- .superpowers/sdd/2026-08-06-stage-7-checkpoints/final-review-fix-report.md. What actually
+-- docs/adr/0005-balance-checkpoints.md. What actually
 -- closes the gap is `LedgerService.checkpointAccount` taking the account's `FOR NO KEY UPDATE`
 -- lock (the same one `postEntry`/`reverseEntry` take) before it reads: with the lock held, no
 -- posting for that account can be mid-insert, so the single read this table's rows are computed
