@@ -249,9 +249,10 @@ export const postings = pgTable(
  * freezes the set is `LedgerService.checkpointAccount` holding the account's `FOR NO KEY
  * UPDATE` lock - the same one `postEntry`/`reverseEntry` take - for the duration of the read:
  * with it held, no posting for this account can be mid-insert, so the row this method computes
- * really is final the moment it is written, under the `row-lock` concurrency strategy.
- * `serializable` writers never take that lock, so a checkpoint computed under that strategy
- * carries no such guarantee.
+ * really is final the moment it is written. `checkpointAccount`'s own comment is the
+ * authoritative statement of what this depends on and why it only holds under the `row-lock`
+ * concurrency strategy - it refuses to run under `serializable` rather than write a row that
+ * carried no such guarantee.
  *
  * A checkpoint keyed on `occurred_at <= D` would assert a sum over a set that is *not*
  * frozen even with the lock, for a different reason: an entry recorded tomorrow, describing

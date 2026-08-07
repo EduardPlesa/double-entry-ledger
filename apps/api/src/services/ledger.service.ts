@@ -116,6 +116,35 @@ export interface CheckpointResult {
   readonly written: boolean;
 }
 
+/**
+ * Thrown by `checkpointAccount` under the `serializable` concurrency strategy, before any read.
+ *
+ * Not a `DomainError`: `checkpointAccount` has no HTTP route, is only ever called from
+ * `scripts/checkpoint.ts` and from tests, and a `DomainErrorCode` exists to answer "what status
+ * does this become", a question this error never gets asked. `ConfigError`
+ * (`config.ts`) is the closer relative - a precondition about how the process is configured
+ * rather than about anything a caller did - but it belongs to environment parsing at startup,
+ * and importing it here for an unrelated runtime refusal would blur what it means. A small,
+ * dedicated class, in the same shape, is the better fit.
+ *
+ * See `checkpointAccount`'s own comment for why this strategy cannot be supported rather than
+ * merely isn't yet.
+ */
+export class CheckpointRequiresRowLockError extends Error {
+  override readonly name = 'CheckpointRequiresRowLockError';
+
+  constructor() {
+    super(
+      `checkpointAccount cannot run under the 'serializable' concurrency strategy: its ` +
+        `correctness depends on the account row lock that postEntry/reverseEntry skip under ` +
+        `that strategy (see lockTouchedAccounts), so a checkpoint computed here could ` +
+        `permanently exclude a posting that was mid-insert when it ran, with nothing about it ` +
+        `ever recorded as wrong. Run this against a connection configured with ` +
+        `LEDGER_CONCURRENCY_STRATEGY=row-lock instead.`,
+    );
+  }
+}
+
 export interface PostingLineResult {
   readonly id: bigint;
   readonly entryId: string;
@@ -543,24 +572,36 @@ export class LedgerService {
    * pay this; this read now does, because both cheaper alternatives were unsound, not because
    * the goal changed.
    *
-   * Skipped under `serializable`, matching `lockTouchedAccounts`: writers under that strategy
-   * never take this lock either, so a lock with nothing to exclude would only add contention.
-   * `serializable` does not get this fix - it inherits the same race the naive version had,
-   * because SSI does not turn a single rw-antidependency into an abort on its own.
+   * **This is the one authoritative comment on the `serializable` gap** - `lockTouchedAccounts`,
+   * `balanceCheckpoints`'s table comment in `schema.ts`, and `0008_balance_checkpoints.sql` each
+   * point back here rather than restating it. `postEntry`/`reverseEntry` skip the account lock
+   * entirely under that strategy (`lockTouchedAccounts`), because SSI is already tracking the
+   * conflict there and an explicit lock would only serialise writers SSI would otherwise let
+   * through. That reasoning does not carry over to a checkpoint: SSI sees a wrong watermark as
+   * a single, unclosed rw-antidependency rather than a cycle, so it commits cleanly rather than
+   * aborting - the original defect, unfixed, under that isolation level alone. Locking the
+   * account here would not change that, because nothing on the write side would be holding it
+   * to conflict with. There is no cheaper fix available under `serializable` within this
+   * design, so rather than silently compute a checkpoint this method cannot vouch for, it
+   * refuses outright: see `CheckpointRequiresRowLockError`, thrown before any read whenever
+   * `this.unitOfWork.strategy === 'serializable'`.
    *
    * A stale checkpoint still costs read time and never correctness: the balance is still
    * `checkpoint + everything after it`, however long ago the checkpoint was taken. What changed
-   * is that a *wrong* checkpoint - one whose watermark excluded a posting that later became
-   * permanently unreachable - is no longer possible under `row-lock`, where it used to be.
+   * under `row-lock` is that a *wrong* checkpoint - one whose watermark excluded a posting that
+   * later became permanently unreachable - is no longer possible, where it used to be.
    */
   async checkpointAccount(bookId: string, accountId: string): Promise<CheckpointResult> {
+    if (this.unitOfWork.strategy === 'serializable') {
+      throw new CheckpointRequiresRowLockError();
+    }
+
     return this.unitOfWork.transactionInBook(bookId, async (tx) => {
       const account = await this.requireAccount(tx, accountId);
 
-      // Same lock, same reason, same exemption under `serializable` - see `lockTouchedAccounts`.
-      if (this.unitOfWork.strategy !== 'serializable') {
-        await this.repository.lockAccounts(tx, [accountId]);
-      }
+      // The strategy is already known to be `row-lock` - see the guard above and this
+      // method's own comment for why `serializable` never reaches here at all.
+      await this.repository.lockAccounts(tx, [accountId]);
 
       const computed = await this.repository.computeCheckpoint(tx, accountId);
 
@@ -751,11 +792,9 @@ export class LedgerService {
   private async lockTouchedAccounts(tx: Executor, legs: readonly PostedLeg[]): Promise<void> {
     // Under SERIALIZABLE the database is already tracking the conflict, and an explicit lock
     // would serialise writers that SSI would have let through - paying for both mechanisms
-    // and getting the worse half of each. `checkpointAccount` skips its own lock under this
-    // same strategy, for the same reason and with the same consequence: SSI on its own does
-    // not close the checkpoint race either (a wrong watermark is a single unclosed
-    // rw-antidependency, not a cycle, so it commits cleanly) - `serializable` inherits that
-    // gap rather than being fixed by this change. See the report cited above.
+    // and getting the worse half of each. What this skip means for `checkpointAccount` - which
+    // cannot simply skip its own lock the same way and stay correct - is explained on
+    // `checkpointAccount` itself, the one place that whole argument is stated.
     if (this.unitOfWork.strategy === 'serializable') return;
 
     await this.repository.lockAccounts(tx, accountsTouched(legs));
