@@ -1,0 +1,37 @@
+-- The index stage 1 deferred until it could be measured, and the one that measurement
+-- showed was not earning its keep.
+--
+-- `postings (account_id, id)` is not primarily a read-path index, and the comment in
+-- schema.ts that once called it one was wrong. Its hottest consumer is the overdraft prefix
+-- scan, which runs inside the entry-insert critical section with the account's row lock
+-- held, and then again in the deferred trigger at COMMIT. Both were sequential scans of
+-- every posting in the table: on the 500k-posting perf corpus, `balance-from-zero` went from
+-- 13,678 buffers/20.8ms to 10,018 buffers/14.9ms; the checkpoint delta sum went from 4,247
+-- buffers/15.1ms to 3 buffers/0.05ms; `postings-page`'s cursor scan went from `postings_pkey`
+-- (285 buffers/0.6ms) to this index directly (258 buffers/0.3ms).
+--
+-- `lowest-prefix` is the exception, and buffers do not explain it. Its account-filtered scan
+-- moved from a Parallel Seq Scan (16,207 buffers) to a Parallel Bitmap Heap Scan on this index
+-- (5,692 buffers) - buffers fell on *both* sides of its join with `entries` too, postings
+-- 6,173 to 2,515 and entries 10,002 to 3,087 - and wall-clock time still rose, 21.4ms to
+-- 57.8ms: the cheaper postings scan led the planner to replace an indexed nested loop into
+-- `entries` with a parallel hash join that sequentially scans all of `entries`. Forcing the
+-- nested loop back on (`SET enable_hashjoin = off`) resolves it - 16.6ms, faster than
+-- baseline, at a *higher* buffer count (12,532) than the losing hash join's. Lowering
+-- `random_page_cost` to 1.1 - appropriate for a working set that lives in shared_buffers, as
+-- this corpus does - gets the planner to pick the nested loop on its own, no forcing needed:
+-- 17.1ms. So the index is not the cause: both the winning and the losing plan get cheaper on
+-- the postings side because of it, and what decides between them is a database-wide cost
+-- setting, not this index or this schema. Neither setting ships as part of this migration -
+-- that is a separate decision - so as shipped, under default planner settings, `lowest-prefix`
+-- still runs the regressed hash-join plan. That gap is open, not resolved. See
+-- docs/performance.md for the plans either side, and for the forced and re-costed captures.
+--
+-- `postings (entry_id)` was written here too and measured on the same five queries. It was
+-- dropped: no plan among the five ever scanned `postings` by `entry_id` - every join to
+-- `entries` looks up `entries`'s own primary key from a `postings` row already in hand, never
+-- the other direction - so the index bought nothing and was removed before this migration
+-- shipped. The null result is recorded in docs/performance.md rather than carried as a write
+-- cost with a story attached.
+
+CREATE INDEX postings_account_id_id_idx ON postings ("account_id", "id");
