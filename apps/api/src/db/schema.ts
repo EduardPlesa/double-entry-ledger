@@ -195,20 +195,115 @@ export const postings = pgTable(
       foreignColumns: [accounts.id, accounts.bookId, accounts.currency],
     }),
 
-    // Deliberately no index on (account_id, id) or on entry_id yet. Stage 7 adds them with
-    // EXPLAIN ANALYZE either side to show what they buy. Indexing a foreign key column is
-    // usually about making parent deletes cheap, and in this schema nothing is ever deleted.
+    // Stage 7 measured this rather than assuming it. `postings(account_id, id)` is not
+    // primarily a read-path index; its hottest consumer is the overdraft prefix scan
+    // (`lowestPrefixBalance`), which runs inside the entry-insert critical section with the
+    // account's row lock held, and then again in the deferred LG004 trigger at COMMIT.
+    // `computeCheckpoint`'s refresh scan (`scripts/checkpoint.ts`) runs under the same lock,
+    // over the same column, for the same reason. On the 500k-posting perf corpus
+    // (`docs/performance.md`): `balance-from-zero` dropped from 13,678 buffers/20.8ms to
+    // 10,018 buffers/14.9ms; the checkpoint delta sum dropped from 4,247 buffers/15.1ms to 3
+    // buffers/0.05ms; `postings-page`'s cursor scan moved off `postings_pkey` onto this index
+    // directly, 285 buffers/0.6ms to 258 buffers/0.3ms.
     //
-    // These were described here as read-path indexes, and stage 4 made that false of the
-    // first one. The overdraft rule reads every prefix of an account's history, so
-    // `lowestPrefixBalance` scans this table with no index to scan it by - a sequential scan
-    // of *all* postings, not of the account's - and it runs inside the critical section, with
-    // the account's row lock held. Then the deferred LG004 trigger runs the same scan again at
-    // COMMIT, once per inserted guarded posting, still inside that window. `postings(account_id)`
-    // is now a write-path index on the hottest lock in the system, and its absence is a known
-    // cost being carried on purpose rather than an oversight: it stays stage 7's work, where
-    // it is measured, alongside the balance-checkpoint question it belongs with. See
-    // docs/adr/0004-concurrency-control.md.
+    // `lowest-prefix` is the exception, and it is not explained by buffers. Its
+    // account-filtered scan moved from a Parallel Seq Scan (16,207 buffers) to a Parallel
+    // Bitmap Heap Scan on this index (5,692 buffers) - buffers fell on both sides of its join
+    // with `entries` too, postings 6,173 to 2,515 and entries 10,002 to 3,087 - and
+    // wall-clock time still rose, 21.4ms to 57.8ms: the cheaper postings scan led the planner
+    // to replace an indexed nested loop into `entries` with a parallel hash join that
+    // sequentially scans all of `entries`. Forcing the nested loop back on
+    // (`SET enable_hashjoin = off`) resolves it - 16.6ms, faster than the original baseline,
+    // at a *higher* buffer count (12,532) than the losing hash join's. Lowering
+    // `random_page_cost` to 1.1, appropriate for a working set that lives in shared_buffers
+    // as this corpus does, gets the planner to pick the nested loop on its own, no forcing
+    // needed - 17.1ms. So the index is not the cause: both the winning and the losing plan get
+    // cheaper on the postings side because of it, and what decides between them is a
+    // database-wide cost setting, not this index or this schema. Neither setting ships as
+    // part of this migration - that is a separate decision - which means as shipped, under
+    // default planner settings, `lowest-prefix` still runs the regressed hash-join plan. That
+    // gap is open, not resolved; docs/performance.md says so. Buffer counts are not a safe
+    // proxy for lock-hold duration here; wall clock is, and this is the query that proved it.
+    //
+    // `postings(entry_id)` was measured alongside it and dropped. Indexing a foreign key
+    // column is usually about making parent deletes cheap, and nothing in this schema is
+    // ever deleted; without that, nothing here reads `postings` by `entry_id` either - every
+    // join to `entries` looks up `entries`'s own primary key from a `postings` row already in
+    // hand, never the reverse - and across all five queries' `EXPLAIN (ANALYZE, BUFFERS)`
+    // output, on both a fresh capture and a repeat, no plan ever named it. An index nobody
+    // measured a use for is a permanent write cost with a story attached; this one's story
+    // didn't hold up, so it isn't here. The null result is in docs/performance.md.
+    index('postings_account_id_id_idx').on(t.accountId, t.id),
+  ],
+);
+
+/**
+ * A balance, and the posting it was true through.
+ *
+ * `through_id` and not a date, and the difference is the whole reason this table exists. A
+ * checkpoint asserts the sum over postings with `id <= through_id`. `postings.id` is a
+ * bigserial assigned at insert, so an entry backdated in `occurred_at` still receives ids
+ * above everything already stored: no later-recorded entry can retroactively enter the set
+ * this row summed just by describing an earlier time. That argument is about backdating and
+ * it still holds - see docs/adr/0005-balance-checkpoints.md - but it is not, on its own, the
+ * reason the set is frozen.
+ *
+ * The actual reason is a lock, not a property of `postings.id` alone. `nextval()` fires at
+ * INSERT time, not at COMMIT, and is not transactional, so a posting can draw an id below a
+ * watermark while its transaction is still open - and if that transaction commits after the
+ * checkpoint is written, its posting sits below `through_id` forever with nothing having
+ * summed it. Two designs that tried to make `computeCheckpoint`'s single read safe against
+ * this on its own - filtering by each posting's `xmin` against a snapshot boundary, and
+ * draining every transaction a snapshot's `xip_list` named before recomputing - were each
+ * disproved with a reproducible counter-example; see
+ * `docs/adr/0005-balance-checkpoints.md`. What actually
+ * freezes the set is `LedgerService.checkpointAccount` holding the account's `FOR NO KEY
+ * UPDATE` lock - the same one `postEntry`/`reverseEntry` take - for the duration of the read:
+ * with it held, no posting for this account can be mid-insert, so the row this method computes
+ * really is final the moment it is written. `checkpointAccount`'s own comment is the
+ * authoritative statement of what this depends on and why it only holds under the `row-lock`
+ * concurrency strategy - it refuses to run under `serializable` rather than write a row that
+ * carried no such guarantee.
+ *
+ * A checkpoint keyed on `occurred_at <= D` would assert a sum over a set that is *not*
+ * frozen even with the lock, for a different reason: an entry recorded tomorrow, describing
+ * last March, lands inside it - and the stored number is then wrong with nothing in the row to
+ * say so. Invalidating it correctly means comparing every entry's `recorded_at` against every
+ * checkpoint's date, which is bitemporal bookkeeping and a different system.
+ *
+ * The same asymmetry bounds what this can accelerate: `asOf` balances and the trial balance
+ * filter on `occurred_at`, and `lowestPrefixBalance` is a minimum over prefixes that a
+ * backdated entry rewrites behind any watermark. None of those can resume from here.
+ */
+export const balanceCheckpoints = pgTable(
+  'balance_checkpoints',
+  {
+    accountId: uuid('account_id').notNull(),
+
+    // Denormalised from accounts, exactly as postings.book_id is, and for the same reason:
+    // the policy stays a column comparison, and the composite foreign key below makes
+    // disagreement impossible.
+    bookId: uuid('book_id').notNull(),
+
+    throughId: bigint('through_id', { mode: 'bigint' }).notNull(),
+    balanceMinor: bigint('balance_minor', { mode: 'bigint' }).notNull(),
+
+    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Also the index the read uses: "the latest checkpoint for this account" is a backwards
+    // scan of this key, so no secondary index is needed.
+    primaryKey({ name: 'balance_checkpoints_pkey', columns: [t.accountId, t.throughId] }),
+
+    foreignKey({
+      name: 'balance_checkpoints_account_same_book_fk',
+      columns: [t.accountId, t.bookId],
+      foreignColumns: [accounts.id, accounts.bookId],
+    }),
+
+    // A watermark of zero would be a claim about no postings at all, which the empty sum
+    // already answers for free.
+    check('balance_checkpoints_through_id_positive', sql`${t.throughId} > 0`),
   ],
 );
 
