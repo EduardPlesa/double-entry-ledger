@@ -19,7 +19,7 @@
  * docs/performance.md, "measured and dropped"), and a harness that still created it would
  * leave a phantom index matching no migration and no schema, which is the same class of bug
  * this comment exists to prevent, just for the other index. If you want that null result
- * reproduced by hand, docs/performance.md's "Reproducing it" section says how.
+ * reproduced by hand, docs/performance.md's "What did not improve, and why that is expected" section says how.
  * `ANALYZE postings` runs after every change, so the planner's statistics always match
  * whatever state the table is actually in.
  *
