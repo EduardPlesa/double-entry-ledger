@@ -108,6 +108,43 @@ export interface BalanceResult {
   readonly balance: Money;
 }
 
+export interface CheckpointResult {
+  readonly accountId: string;
+  readonly throughId: bigint;
+  readonly balance: Money;
+  /** False when a checkpoint already existed at this watermark, or the account has no postings. */
+  readonly written: boolean;
+}
+
+/**
+ * Thrown by `checkpointAccount` under the `serializable` concurrency strategy, before any read.
+ *
+ * Not a `DomainError`: `checkpointAccount` has no HTTP route, is only ever called from
+ * `scripts/checkpoint.ts` and from tests, and a `DomainErrorCode` exists to answer "what status
+ * does this become", a question this error never gets asked. `ConfigError`
+ * (`config.ts`) is the closer relative - a precondition about how the process is configured
+ * rather than about anything a caller did - but it belongs to environment parsing at startup,
+ * and importing it here for an unrelated runtime refusal would blur what it means. A small,
+ * dedicated class, in the same shape, is the better fit.
+ *
+ * See `checkpointAccount`'s own comment for why this strategy cannot be supported rather than
+ * merely isn't yet.
+ */
+export class CheckpointRequiresRowLockError extends Error {
+  override readonly name = 'CheckpointRequiresRowLockError';
+
+  constructor() {
+    super(
+      `checkpointAccount cannot run under the 'serializable' concurrency strategy: its ` +
+        `correctness depends on the account row lock that postEntry/reverseEntry skip under ` +
+        `that strategy (see lockTouchedAccounts), so a checkpoint computed here could ` +
+        `permanently exclude a posting that was mid-insert when it ran, with nothing about it ` +
+        `ever recorded as wrong. Run this against a connection configured with ` +
+        `LEDGER_CONCURRENCY_STRATEGY=row-lock instead.`,
+    );
+  }
+}
+
 export interface PostingLineResult {
   readonly id: bigint;
   readonly entryId: string;
@@ -260,7 +297,7 @@ export class LedgerService {
           currency: leg.amount.currency,
         }));
 
-        await this.lockAccountsAtRisk(tx, postedLegs, accounts);
+        await this.lockTouchedAccounts(tx, postedLegs);
 
         const entry = await this.repository.insertEntry(tx, {
           id: entryId,
@@ -378,7 +415,7 @@ export class LedgerService {
       }));
 
       const accounts = await this.accountsOfLegs(tx, legs);
-      await this.lockAccountsAtRisk(tx, legs, accounts);
+      await this.lockTouchedAccounts(tx, legs);
 
       const reversal = await this.repository.insertEntry(tx, {
         id: this.newId(),
@@ -506,20 +543,96 @@ export class LedgerService {
   async getBalance(bookId: string, accountId: string, asOf?: Date | undefined): Promise<BalanceResult> {
     return this.unitOfWork.transactionInBook(bookId, async (tx) => {
       const account = await this.requireAccount(tx, accountId);
-      const total = await this.repository.sumPostings(tx, accountId, asOf);
+      const total =
+        asOf === undefined
+          ? await this.balanceThrough(tx, accountId)
+          : // An occurred_at question. The checkpoint knows nothing about the dates of the
+            // postings it summed, so this stays a sum from zero - see the table comment.
+            await this.repository.sumPostings(tx, accountId, asOf);
 
       return { accountId, asOf: asOf ?? null, balance: money(total, account.currency) };
     });
   }
 
   /**
+   * Writes a checkpoint for one account.
+   *
+   * Called by the maintenance script and by tests, never by the write path - but it now takes
+   * the same `FOR NO KEY UPDATE` lock the write path takes, and that is a real cost this method
+   * did not used to pay. Two earlier designs tried to avoid paying it: comparing each posting's
+   * `xmin` against a snapshot boundary, and draining every transaction a snapshot's `xip_list`
+   * named before recomputing. Both were disproved with a reproducible counter-example rather
+   * than shipped - see `docs/adr/0005-balance-checkpoints.md` for both. `computeCheckpoint`'s `max(postings.id)` plus
+   * `sum(amount_minor)`, in one statement, is only a safe watermark if nothing can be mid-insert
+   * for this account while it runs, and the lock is what makes that true rather than assumed:
+   * with it held, no writer can be between drawing a posting id and committing it, so the
+   * watermark this reads really does describe a closed set. Stage 4's ADR wanted the
+   * entry-insert critical section to stay narrow specifically so a *read* would never need to
+   * pay this; this read now does, because both cheaper alternatives were unsound, not because
+   * the goal changed.
+   *
+   * **This is the one authoritative comment on the `serializable` gap** - `lockTouchedAccounts`,
+   * `balanceCheckpoints`'s table comment in `schema.ts`, and `0008_balance_checkpoints.sql` each
+   * point back here rather than restating it. `postEntry`/`reverseEntry` skip the account lock
+   * entirely under that strategy (`lockTouchedAccounts`), because SSI is already tracking the
+   * conflict there and an explicit lock would only serialise writers SSI would otherwise let
+   * through. That reasoning does not carry over to a checkpoint: SSI sees a wrong watermark as
+   * a single, unclosed rw-antidependency rather than a cycle, so it commits cleanly rather than
+   * aborting - the original defect, unfixed, under that isolation level alone. Locking the
+   * account here would not change that, because nothing on the write side would be holding it
+   * to conflict with. There is no cheaper fix available under `serializable` within this
+   * design, so rather than silently compute a checkpoint this method cannot vouch for, it
+   * refuses outright: see `CheckpointRequiresRowLockError`, thrown before any read whenever
+   * `this.unitOfWork.strategy === 'serializable'`.
+   *
+   * A stale checkpoint still costs read time and never correctness: the balance is still
+   * `checkpoint + everything after it`, however long ago the checkpoint was taken. What changed
+   * under `row-lock` is that a *wrong* checkpoint - one whose watermark excluded a posting that
+   * later became permanently unreachable - is no longer possible, where it used to be.
+   */
+  async checkpointAccount(bookId: string, accountId: string): Promise<CheckpointResult> {
+    if (this.unitOfWork.strategy === 'serializable') {
+      throw new CheckpointRequiresRowLockError();
+    }
+
+    return this.unitOfWork.transactionInBook(bookId, async (tx) => {
+      const account = await this.requireAccount(tx, accountId);
+
+      // The strategy is already known to be `row-lock` - see the guard above and this
+      // method's own comment for why `serializable` never reaches here at all.
+      await this.repository.lockAccounts(tx, [accountId]);
+
+      const computed = await this.repository.computeCheckpoint(tx, accountId);
+
+      // No postings, no watermark. The empty sum already answers this account for free, and
+      // the CHECK constraint on `through_id` refuses the row anyway.
+      if (computed.throughId === 0n) {
+        return { accountId, throughId: 0n, balance: money(0n, account.currency), written: false };
+      }
+
+      const written = await this.repository.insertCheckpoint(tx, {
+        accountId,
+        bookId,
+        throughId: computed.throughId,
+        balanceMinor: computed.balanceMinor,
+      });
+
+      return {
+        accountId,
+        throughId: computed.throughId,
+        balance: money(computed.balanceMinor, account.currency),
+        written,
+      };
+    });
+  }
+
+  /**
    * One page of an account's postings, oldest first, each with the balance after it.
    *
-   * A bounded number of queries per page - three, or two on the first page - regardless of
+   * A bounded number of queries per page - four, or two on the first page - regardless of
    * page size, so this cannot become an N+1. The running balance starts from the sum of
-   * everything up to the cursor, which is a fresh sum-from-zero on every page and therefore
-   * the slow part; stage 7 replaces that one query with a checkpoint lookup and asserts the
-   * two agree.
+   * everything up to the cursor, which now resumes from the account's latest checkpoint
+   * instead of a fresh sum-from-zero on every page.
    *
    * Every posting on an account shares the account's currency - the composite foreign key on
    * `postings` makes any other combination unrepresentable - so a single running total is
@@ -537,9 +650,7 @@ export class LedgerService {
       const account = await this.requireAccount(tx, accountId);
 
       const opening =
-        afterId === undefined
-          ? 0n
-          : await this.repository.sumPostingsThrough(tx, accountId, afterId);
+        afterId === undefined ? 0n : await this.balanceThrough(tx, accountId, afterId);
 
       // One row more than asked for: the cheapest way to know whether a next page exists
       // without a second count query, and the extra row is discarded.
@@ -550,6 +661,38 @@ export class LedgerService {
 
       return buildPostingPage({ accountId, currency: account.currency, rows, limit, opening });
     });
+  }
+
+  /**
+   * An account's balance, through a posting id or through all of them, resuming from the
+   * latest checkpoint when there is one that helps.
+   *
+   * "That helps" is the second condition: a checkpoint above the requested `throughId`
+   * summed postings the caller has asked to exclude, so it is not a starting point for this
+   * question and the sum from zero answers it instead. That happens on any page whose cursor
+   * points behind the newest checkpoint, which is every page but the last few.
+   */
+  private async balanceThrough(
+    tx: Executor,
+    accountId: string,
+    throughId?: bigint | undefined,
+  ): Promise<bigint> {
+    const checkpoint = await this.repository.latestCheckpoint(tx, accountId);
+
+    if (checkpoint === null || (throughId !== undefined && checkpoint.throughId > throughId)) {
+      return throughId === undefined
+        ? this.repository.sumPostings(tx, accountId)
+        : this.repository.sumPostingsThrough(tx, accountId, throughId);
+    }
+
+    const delta = await this.repository.sumPostingsAfter(
+      tx,
+      accountId,
+      checkpoint.throughId,
+      throughId,
+    );
+
+    return checkpoint.balanceMinor + delta;
   }
 
   /**
@@ -607,37 +750,52 @@ export class LedgerService {
   }
 
   /**
-   * Locks every guarded account this entry could overdraw, before anything is written.
+   * Locks every account this entry posts to, before anything is written.
    *
    * Before, not after: a lock taken after the insert would still leave the read that decides
-   * the entry's fate outside any mutual exclusion, which is the whole bug. Only the accounts
-   * carrying a negative leg are locked, and that is sufficient - two transactions can only
-   * jointly overdraw an account if both take money out of it, and both of those arrive here.
+   * the entry's fate outside any mutual exclusion, which is the whole bug.
    *
-   * A concurrent *positive* posting is therefore not blocked by this lock, and that is a
-   * deliberate property rather than a gap. Adding a positive posting at time T raises the
-   * prefixes at or after T and lowers none, so a depositor can never turn a decision made here
-   * into the wrong one. It is also why `lockAccounts` asks for `FOR NO KEY UPDATE` rather than
-   * `FOR UPDATE`: the depositor's own insert takes `FOR KEY SHARE` on the account row for the
-   * foreign key check, `FOR UPDATE` would conflict with that, and a pair of mirrored transfers
-   * would then deadlock on locks neither transaction knew it was taking. Under the weaker mode
-   * the claim is true in the way it reads - the deposit genuinely does pass - while two
-   * withdrawals from one account still serialise against each other.
+   * Every account, not only the guarded ones carrying a negative leg. That used to be the
+   * whole set - sufficient for the overdraft rule, since two transactions can only jointly
+   * overdraw an account if both take money out of it, and both of those arrived here. Stage 7's
+   * balance checkpoints needed more: `checkpointAccount` reads `max(postings.id)` and
+   * `sum(amount_minor)` for an account in one statement, and that statement is only a safe
+   * watermark if no posting for that account can be mid-insert while it runs. `postings.id` is
+   * a bigserial - `nextval()` fires when the INSERT executes, not at COMMIT, and it is not
+   * transactional - so id order and commit order can disagree, and two attempts to infer a safe
+   * watermark from that alone (comparing row `xmin` against a snapshot's `xmin`; draining every
+   * transaction visible in a snapshot's `xip_list`) were each disproved with a reproducible
+   * counter-example rather than shipped - see `docs/adr/0005-balance-checkpoints.md`. Locking the account removes the need to infer anything: with
+   * the lock held, nothing can be mid-insert for it, full stop.
    *
-   * This method's own contract is unchanged either way: the accounts it names must be locked
-   * in a consistent order, which is what `guardedAccountsAtRisk` sorting them provides.
+   * That widens the critical section on every write, not only the ones that could overdraw
+   * something - a cost stage 4's ADR set out specifically to avoid, and one this pays anyway
+   * because both cheaper alternatives turned out to be unsound. A positive-only entry now
+   * blocks behind, and is blocked behind by, another writer to the same account exactly as a
+   * negative-leg one always did; the "a deposit never blocks or is blocked" property the old
+   * comment here described no longer holds; the concurrency suite's timings are the place this
+   * shows up, not a correctness assertion.
+   *
+   * `FOR NO KEY UPDATE` rather than `FOR UPDATE`, still, and for two reasons now instead of
+   * one. The original: a posting's own insert takes `FOR KEY SHARE` on its account row for the
+   * foreign key check, `FOR UPDATE` conflicts with that, and a pair of mirrored transfers would
+   * deadlock on locks neither transaction knew it was taking. The new one: `checkpointAccount`
+   * takes this same lock, and a maintenance read has no business escalating to a mode that
+   * would fight a concurrent account-tree insert's `FOR KEY SHARE` on the parent row.
+   *
+   * The accounts must still be locked in a consistent order across every caller, which is what
+   * `accountsTouched` sorting them provides - now over a wider set than before, but the same
+   * mechanism `tests/concurrency/deadlock.test.ts` exercises.
    */
-  private async lockAccountsAtRisk(
-    tx: Executor,
-    legs: readonly PostedLeg[],
-    known: ReadonlyMap<string, AccountRecord>,
-  ): Promise<void> {
+  private async lockTouchedAccounts(tx: Executor, legs: readonly PostedLeg[]): Promise<void> {
     // Under SERIALIZABLE the database is already tracking the conflict, and an explicit lock
     // would serialise writers that SSI would have let through - paying for both mechanisms
-    // and getting the worse half of each.
+    // and getting the worse half of each. What this skip means for `checkpointAccount` - which
+    // cannot simply skip its own lock the same way and stay correct - is explained on
+    // `checkpointAccount` itself, the one place that whole argument is stated.
     if (this.unitOfWork.strategy === 'serializable') return;
 
-    await this.repository.lockAccounts(tx, guardedAccountsAtRisk(legs, known));
+    await this.repository.lockAccounts(tx, accountsTouched(legs));
   }
 
   /**
@@ -681,14 +839,16 @@ export class LedgerService {
    * `assertPostable`; `reverseEntry` does not, because its legs come from the original entry
    * rather than from user input that had to be validated.
    *
-   * A short read is an error rather than a smaller map, and the asymmetry is the reason. Every
-   * downstream use of this map - `guardedAccountsAtRisk`, and through it both the lock and the
-   * overdraft check - treats an id it cannot find as an account that needs neither, so a
-   * missing row does not fail loudly; it silently means "no lock, no check" for exactly the
-   * account whose absence nobody noticed. Nothing should be able to produce that here, since
-   * the composite foreign key on `postings` guarantees a parent row in the same book and this
-   * runs under the same book's policy. Which is precisely why, if it ever happens, the right
-   * answer is to stop rather than to write an entry under a rule that quietly did not apply.
+   * A short read is an error rather than a smaller map, and the asymmetry is the reason.
+   * `guardedAccountsAtRisk` - the overdraft check's filter, downstream of this map - treats an
+   * id it cannot find as an account that needs no check, so a missing row here does not fail
+   * loudly; it silently means "no overdraft check" for exactly the account whose absence
+   * nobody noticed. `accountsTouched`, the lock's own filter, does not consume this map at all
+   * and so carries no equivalent silent gap - it locks every account a leg names, found in
+   * `known` or not. Nothing should be able to produce a missing row here regardless: the foreign key
+   * on `postings` guarantees a parent row in the same book and this runs under the same book's
+   * policy. Which is precisely why, if it ever happens, the right answer is to stop rather than
+   * to write an entry under a rule that quietly did not apply.
    */
   private async accountsOfLegs(
     tx: Executor,
@@ -826,10 +986,14 @@ interface PostedLeg {
 /**
  * Which accounts this entry could possibly overdraw: guarded, and taking money out.
  *
- * Sorted, so the order accounts are checked - and, from the row-lock fix onwards, locked -
- * is a property of the data rather than of how the caller happened to order the legs. Two
- * concurrent entries touching the same pair of accounts in opposite order would otherwise
- * deadlock.
+ * No longer what decides what gets locked - see `accountsTouched` and `lockTouchedAccounts`
+ * for that, and for why the two questions came apart. This is purely `assertNoOverdraft`'s
+ * filter now: the overdraft rule only has anything to say about a guarded account losing
+ * money, so only those accounts are worth a `lowestPrefixBalance` scan.
+ *
+ * Sorted anyway, though nothing about the overdraft check itself needs an order: the two
+ * callers used to be the same list, and keeping this one sorted costs nothing and avoids the
+ * question ever coming up again for whoever adds a third.
  */
 function guardedAccountsAtRisk(
   legs: readonly PostedLeg[],
@@ -845,6 +1009,18 @@ function guardedAccountsAtRisk(
   }
 
   return [...atRisk].sort();
+}
+
+/**
+ * Every account this entry posts to, guarded or not, taking money out or in.
+ *
+ * This is the lock's set now, not the overdraft check's - see `lockTouchedAccounts` for why it
+ * had to widen. Sorted for the same reason `guardedAccountsAtRisk` always was: two concurrent
+ * entries touching the same accounts must lock them in the same order, or they deadlock on
+ * each other. `tests/concurrency/deadlock.test.ts` is what exercises this over the wider set.
+ */
+function accountsTouched(legs: readonly PostedLeg[]): string[] {
+  return [...new Set(legs.map((leg) => leg.accountId))].sort();
 }
 
 /**
