@@ -333,3 +333,73 @@ actually separate the two.
   leaving the assumption to luck. The trigger's own `WHEN` clause was deliberately left broad:
   narrowing it to negative postings would make it a mirror of the service's optimisation
   instead of an independent check of it.
+
+## Amendment, 2026-08-08: the write path locks every touched account, not only the at-risk ones
+
+Everything above describes the lock this decision shipped with: `lockAccountsAtRisk` collects
+only the guarded accounts an entry takes money out of, and that set is what `postEntry` locks
+before inserting. That is no longer what the code does. `LedgerService.lockTouchedAccounts`
+replaces it, and it locks every account named in an entry's legs - guarded or not, losing
+money or gaining it.
+
+**Why it widened.** Stage 7 added `LedgerService.checkpointAccount`, which reads
+`max(postings.id)` and `sum(amount_minor)` for an account in one statement and stores the
+result as a watermark other reads can resume from. That statement is only a safe watermark if
+no posting for the account can be mid-insert while it runs, and nothing about the statement
+itself can establish that: `postings.id` is a `bigserial`, `nextval()` fires at INSERT and is
+not transactional, so id order and commit order can disagree, and a single consistent read of
+`postings` cannot tell "no writer is mid-insert" apart from "one is, and this read simply
+cannot see its uncommitted row yet." Two designs tried to infer safety from the read alone -
+comparing each posting's `xmin` against a snapshot boundary, and draining every transaction a
+snapshot's `xip_list` named before recomputing - and both were disproved with a reproducible
+counter-example against live Postgres 16. `docs/adr/0005-balance-checkpoints.md` carries both
+counter-examples in full; the short version is that inference from within a single read was
+never going to close this gap, no matter which snapshot function it read from.
+
+The fix is the same one this document already made for the overdraft rule: stop inferring,
+exclude instead. `checkpointAccount` takes the account's `FOR NO KEY UPDATE` lock before its
+read, which is only a guarantee if the write path is guaranteed to hold that same lock for
+every posting it inserts on that account - not only the postings that could overdraw it. A
+positive-leg posting was exactly the case the old, narrower lock let through unlocked, and it
+is exactly the case that would have made a checkpoint's watermark wrong. Widening
+`lockTouchedAccounts` to cover every account a leg touches is what closes that gap; there is
+no narrower set that both suffices for `checkpointAccount` and still excludes some writes, so
+it is not a middle ground this amendment declined to take.
+
+**What it costs.** A pure deposit - an entry with no negative leg on any guarded account - now
+takes the account lock and can block, or be blocked by, another write to the same account.
+Option A's analysis above specifically noted the opposite as a property of the original
+design: "a concurrent *positive* posting is not blocked, and does not need to be." That
+sentence is no longer true. It was true of the overdraft rule alone, and the overdraft rule
+alone is no longer the only reason this lock exists.
+
+**What did not change.** The lock mode is still `FOR NO KEY UPDATE`, for both of the reasons
+already on record - it does not conflict with the `FOR KEY SHARE` the postings foreign-key
+check takes on an account row, and the crossed-transfer deadlock `FOR UPDATE` produced does
+not recur under it. The accounts touched by one call are still locked in one ascending-id
+order, by the same sort this document already documents as contract rather than as an
+accident of index layout; `tests/concurrency/deadlock.test.ts` exercises the same mechanism
+over the now-wider set it locks. `LEDGER_CONCURRENCY_STRATEGY=serializable` still skips the
+account lock entirely on the write side, for the same reason as before - SSI is already
+tracking the conflict, and an explicit lock would only serialise writers SSI would otherwise
+let through. What changes under `serializable` is on the read side, not here:
+`checkpointAccount` cannot get the same guarantee from SSI that it gets from the lock, and
+refuses to run under that strategy rather than write a watermark it cannot vouch for -
+`docs/adr/0005-balance-checkpoints.md` is the one place that refusal is argued in full.
+
+**The Deadlock risk section above needs one correction in light of this widening, not just a
+note that it still holds.** That section's account of the crossed-transfer case -
+`[cash −100, bank +100]` against `[bank −100, cash +100]` - says "each side explicitly locks
+one account and merely writes to the other," with the other account reached only through the
+implicit `FOR KEY SHARE` the postings foreign-key check takes. That description was accurate
+under `lockAccountsAtRisk`, which locked only the negative-leg account on each side. It is no
+longer accurate: `lockTouchedAccounts` locks every account a leg names, so both `cash` and
+`bank` are now explicitly locked, sorted, on *both* sides of the crossed transfer - the same
+shape the section already describes for two entries that each drain both accounts. The
+`FOR NO KEY UPDATE` mode is still what makes the *un*-widened original code safe against the
+`FOR KEY SHARE` the foreign-key check takes, and that argument is unchanged and still load-
+bearing generally. But the crossed-transfer case specifically no longer needs it to avoid a
+deadlock: the widened lock set means both transactions now request `cash` and `bank` through
+the same explicit, sorted call, so the second to arrive blocks on the first account in the
+order rather than each holding one and waiting on the other. `tests/concurrency/deadlock.test.ts`
+passes against the widened lock, but for a reason one layer deeper than before.
