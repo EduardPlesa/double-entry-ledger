@@ -56,6 +56,17 @@ pnpm typecheck
 pnpm lint
 ```
 
+Developing the frontend against a live API means two long-running processes, not one:
+`pnpm --filter @ledger/api dev` and `pnpm --filter @ledger/web dev`. They stay separate rather
+than one script starting both, because their failure modes are different enough that
+interleaved logs would hide which one to look at. Vite's dev server proxies each API path to
+the API process, and it forwards them verbatim - no `/api` prefix, no rewrite. That is load-
+bearing, not tidiness: the refresh cookie is set with `Path=/auth`, so a browser only attaches
+it to requests whose path starts with `/auth`. Prefix that with `/api` and the cookie still
+gets set on login, but the browser silently withholds it from `/api/auth/refresh` on the next
+request - every session dies at its first refresh, with nothing in the response to say why.
+Same-origin proxying also keeps the cookie's `sameSite=lax` doing the job it was chosen for.
+
 ## Property-based tests
 
 The suites above pin the cases someone thought of. `apps/api/tests/properties/` states the same
@@ -129,7 +140,7 @@ apps/api/src/services           business rules: no Express, no SQL
 apps/api/src/repositories       data access: no business rules
 apps/api/src/db                 pool, transactions, schema, migrations
 apps/api/src/composition.ts     the one place interfaces meet implementations
-apps/web                        stage 6
+apps/web                        the SPA: session, the book picker, and the forms behind them
 packages/shared                 Money, Clock, ids — both sides import these
 docker/initdb                   cluster bootstrap: role creation and credentials
 ```
