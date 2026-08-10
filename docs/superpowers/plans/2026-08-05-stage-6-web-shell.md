@@ -152,7 +152,7 @@ export default defineConfig({
 });
 ```
 
-`changeOrigin: false` keeps the `Host` header as the dev server's own, so the cookie is written for the origin the browser is actually on.
+`changeOrigin: false` is fine as is: there is no name-based virtual hosting on the target for a rewritten `Host` header to matter to. It's the unprefixed path, not this setting, that keeps `Path=/auth` matchable.
 
 - [ ] **Step 5: Nothing to do — the API can already be started**
 
