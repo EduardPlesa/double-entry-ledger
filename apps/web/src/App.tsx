@@ -2,9 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { ApiError } from './api/problem';
+import { Books } from './routes/Books';
 import { Login } from './routes/Login';
 import { Register } from './routes/Register';
-import { RequireSession, SessionProvider, useSession } from './session/SessionProvider';
+import { RequireSession, SessionProvider } from './session/SessionProvider';
 import { ToastProvider } from './toast/ToastProvider';
 
 /**
@@ -52,17 +53,5 @@ export function App() {
         </ToastProvider>
       </BrowserRouter>
     </QueryClientProvider>
-  );
-}
-
-/** Placeholder. Task 7 replaces this with the real books screen and deletes this component. */
-function Books() {
-  const { user, signOut } = useSession();
-
-  return (
-    <main className="p-8">
-      <span>{user?.email}</span>
-      <button type="button" onClick={() => { void signOut(); }}>Sign out</button>
-    </main>
   );
 }
