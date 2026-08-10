@@ -4,7 +4,37 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "echo \"no web tests until stage 6\" && exit 0",
-    "typecheck": "echo \"no web sources until stage 6\" && exit 0"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.7.1",
+    "@ledger/shared": "workspace:*",
+    "@tanstack/react-query": "5.101.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-hook-form": "7.85.0",
+    "react-router": "8.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.8.0",
+    "jsdom": "30.0.1",
+    "msw": "2.15.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
   }
 }
