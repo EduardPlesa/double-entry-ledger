@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { App } from '../src/App';
 
 describe('App', () => {
-  it('renders the application name', () => {
+  it('lands on the login screen when booted with no session', async () => {
     render(<App />);
 
-    expect(screen.getByRole('heading', { name: 'Ledger' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument();
   });
 });
