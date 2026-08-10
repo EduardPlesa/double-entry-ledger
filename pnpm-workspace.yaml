@@ -5,9 +5,12 @@ packages:
 # esbuild and protobufjs need their install scripts to link native binaries; vitest and
 # testcontainers do not work without them. ssh2 and cpu-features only build optional
 # native crypto used when talking to a Docker daemon over SSH, they need a full MSVC
-# toolchain on Windows, and ssh2 falls back to pure JS - so both stay off.
+# toolchain on Windows, and ssh2 falls back to pure JS - so both stay off. msw's postinstall
+# only copies a browser service worker script, and only when the consuming package.json sets
+# `msw.workerDirectory`; apps/web does not, so the script is a no-op - allowed for simplicity.
 allowBuilds:
   esbuild: true
   protobufjs: true
   ssh2: false
   cpu-features: false
+  msw: true
