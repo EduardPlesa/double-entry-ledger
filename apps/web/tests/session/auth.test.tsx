@@ -64,6 +64,20 @@ describe('signing in', () => {
     expect(await screen.findByText(/at least 12 characters/i)).toBeInTheDocument();
   });
 
+  it('returns to the page that redirected here, once signed in', async () => {
+    const user = userEvent.setup();
+    window.history.pushState(null, '', '/books?tab=archived');
+
+    render(<App />);
+
+    await user.type(await screen.findByLabelText(/email/i), 'owner@example.com');
+    await user.type(screen.getByLabelText(/password/i), 'a-long-enough-password');
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await screen.findByText(USER.email);
+    expect(window.location.pathname + window.location.search).toBe('/books?tab=archived');
+  });
+
   it('surfaces a rejected credential as a toast carrying the request id', async () => {
     const user = userEvent.setup();
     server.use(

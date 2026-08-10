@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
-import { Link, useNavigate } from 'react-router';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { credentials, type CredentialsInput } from '@ledger/shared';
 import { FieldError } from '../forms/FieldError';
 import { useSession } from '../session/SessionProvider';
@@ -16,13 +16,17 @@ export function Login() {
   const { signIn } = useSession();
   const { showError } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const form = useForm<CredentialsInput>({ resolver: zodResolver(credentials) });
 
   const onSubmit = form.handleSubmit(async (values) => {
     try {
       await signIn(values);
-      await navigate('/books');
+      // `RequireSession` stashes where the guard caught the user before bouncing them here.
+      // Falling back to `/books` covers arriving at `/login` directly, with no guard involved.
+      const from = (location.state as { from?: string } | null)?.from;
+      await navigate(from ?? '/books', { replace: true });
     } catch (error) {
       showError(error);
     }
