@@ -886,7 +886,12 @@ describe('apiFetch', () => {
   });
 
   it('attaches the bearer token when there is one, and no header when there is not', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({}));
+    // Two `Once` calls rather than one `mockResolvedValue`: a `Response` body can only be
+    // read once, so handing the same instance to both calls fails on the second read.
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({}))
+      .mockResolvedValueOnce(json({}));
 
     await apiFetch('/books');
     expect(headersOf(fetchSpy.mock.calls[0]).has('authorization')).toBe(false);
@@ -908,7 +913,10 @@ describe('apiFetch', () => {
   });
 
   it('sends the idempotency key it was given, and none when it was given none', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({}, 201));
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({}, 201))
+      .mockResolvedValueOnce(json({}, 201));
 
     await apiFetch('/books/1/entries', { method: 'POST', body: {}, idempotencyKey: 'key-1' });
     expect(headersOf(fetchSpy.mock.calls[0]).get('idempotency-key')).toBe('key-1');
