@@ -12,6 +12,7 @@
     "db:nuke": "docker compose down -v",
     "db:generate": "pnpm --filter @ledger/api db:generate",
     "db:migrate": "pnpm --filter @ledger/api db:migrate",
+    "dev": "pnpm --filter @ledger/api dev",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
