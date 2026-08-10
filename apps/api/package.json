@@ -6,6 +6,8 @@
   "scripts": {
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node --env-file-if-exists=../../.env --import tsx src/db/migrate.ts",
+    "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/server.ts",
+    "start": "node --env-file-if-exists=../../.env --import tsx src/server.ts",
     "checkpoint": "node --env-file-if-exists=../../.env --import tsx scripts/checkpoint.ts",
     "perf:seed": "node --env-file-if-exists=../../.env --import tsx scripts/seed-perf.ts",
     "perf:explain": "node --env-file-if-exists=../../.env --import tsx scripts/explain.ts",
