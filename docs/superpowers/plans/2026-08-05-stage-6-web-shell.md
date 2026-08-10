@@ -56,7 +56,7 @@ Spec: `docs/superpowers/specs/2026-08-05-stage-6-frontend-design.md`.
 - Create: `apps/web/tsconfig.json`, `apps/web/vite.config.ts`, `apps/web/index.html`
 - Create: `apps/web/src/main.tsx`, `apps/web/src/App.tsx`, `apps/web/src/index.css`
 - Create: `apps/web/tests/setup.ts`, `apps/web/tests/App.test.tsx`
-- Modify: `eslint.config.js`, `apps/api/package.json`
+- Modify: `eslint.config.js`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -154,13 +154,18 @@ export default defineConfig({
 
 `changeOrigin: false` keeps the `Host` header as the dev server's own, so the cookie is written for the origin the browser is actually on.
 
-- [ ] **Step 5: Give the API a dev script to proxy to**
+- [ ] **Step 5: Nothing to do — the API can already be started**
 
-`apps/api` has no way to start a server for development. It has an entrypoint — `apps/api/src/server.ts` — but no script that runs it. Add one to `apps/api/package.json`'s scripts, matching the style of `db:migrate` directly above it:
+This step originally added a `dev` script to `apps/api`. It is already there, along with `start`
+and the `apps/api/src/server.ts` entrypoint they run, carried onto this branch from the stage-7
+server-entrypoint work:
 
 ```json
-    "dev": "node --env-file-if-exists=../../.env --import tsx src/server.ts",
+    "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/server.ts",
 ```
+
+Leave all three alone. Do not add a second `dev` script, do not drop the `--watch`, and do not
+include `apps/api/package.json` in this task's commit.
 
 - [ ] **Step 6: Write the entry point, the shell, and the stylesheet**
 
@@ -296,7 +301,7 @@ Expected: all clean. `pnpm -r test` now runs three suites — `apps/api`, `packa
 - [ ] **Step 11: Commit**
 
 ```bash
-git add apps/web apps/api/package.json eslint.config.js pnpm-lock.yaml package.json
+git add apps/web eslint.config.js pnpm-lock.yaml package.json
 git commit -m "feat(web): the scaffold, and a proxy that keeps the refresh cookie's path"
 ```
 
