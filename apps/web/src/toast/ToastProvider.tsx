@@ -9,8 +9,10 @@ import { ApiError } from '../api/problem';
  * with no response at all - the network, not the server - says so, rather than rendering an
  * empty field, because a blank id reads as an answer.
  *
- * Local rather than a toast library: this is a queue, a timer and an `aria-live` region, and
- * the three of them are smaller than the configuration a library would need.
+ * Local rather than a toast library: this is a queue and an `aria-live` region, and the two of
+ * them are smaller than the configuration a library would need. There is no timer - a toast
+ * persists until its own "Dismiss" button is clicked, so a request id is never on screen for
+ * less time than it takes to read and copy it.
  */
 
 interface Toast {
