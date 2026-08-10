@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  getAccessToken,
-  getSessionUser,
-  onSessionLost,
-  refreshSession,
-  setAccessToken,
-} from '../../src/api/session';
+import { getAccessToken, onSessionLost, refreshSession, setAccessToken } from '../../src/api/session';
 
 function sessionResponse(accessToken: string): Response {
   return new Response(
@@ -42,9 +36,9 @@ describe('refreshSession', () => {
   it('posts to /auth/refresh with credentials and stores the new token', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sessionResponse('token-2'));
 
-    const token = await refreshSession();
+    const session = await refreshSession();
 
-    expect(token).toBe('token-2');
+    expect(session?.token).toBe('token-2');
     expect(getAccessToken()).toBe('token-2');
 
     const [url, init] = fetchSpy.mock.calls[0] ?? [];
@@ -53,13 +47,13 @@ describe('refreshSession', () => {
     expect(init?.credentials).toBe('include');
   });
 
-  it('runs one request when called concurrently, and gives both callers the same token', async () => {
+  it('runs one request when called concurrently, and gives both callers the same session', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sessionResponse('token-3'));
 
     const [first, second] = await Promise.all([refreshSession(), refreshSession()]);
 
-    expect(first).toBe('token-3');
-    expect(second).toBe('token-3');
+    expect(first?.token).toBe('token-3');
+    expect(second?.token).toBe('token-3');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -75,29 +69,19 @@ describe('refreshSession', () => {
     const lost = vi.fn();
     onSessionLost(lost);
 
-    const token = await refreshSession();
+    const session = await refreshSession();
 
-    expect(token).toBeNull();
+    expect(session).toBeNull();
     expect(getAccessToken()).toBeNull();
     expect(lost).toHaveBeenCalledTimes(1);
   });
 
-  it('records the user the refresh answered with', async () => {
+  it('returns the user the refresh answered with, alongside the token', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(sessionResponse('token-4'));
 
-    await refreshSession();
+    const session = await refreshSession();
 
-    expect(getSessionUser()).toEqual({ id: 'user-1', email: 'someone@example.com' });
-  });
-
-  it('clears the recorded user when the refresh is refused', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(sessionResponse('token-5'));
-    await refreshSession();
-
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 401 }));
-    await refreshSession();
-
-    expect(getSessionUser()).toBeNull();
+    expect(session).toEqual({ token: 'token-4', user: { id: 'user-1', email: 'someone@example.com' } });
   });
 
   it('treats a network failure as a lost session rather than throwing', async () => {
