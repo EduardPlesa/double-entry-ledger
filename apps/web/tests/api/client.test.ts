@@ -114,7 +114,7 @@ describe('apiFetch', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(problem('UNAUTHENTICATED', 401))
-      .mockResolvedValueOnce(json({ accessToken: 'token-2' }))
+      .mockResolvedValueOnce(json({ accessToken: 'token-2', user: { id: 'u', email: 'e@example.com' } }))
       .mockResolvedValueOnce(json({ id: 'entry-1' }, 201));
 
     await apiFetch('/books/1/entries', { method: 'POST', body: {}, idempotencyKey: 'key-9' });
@@ -127,7 +127,7 @@ describe('apiFetch', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(problem('UNAUTHENTICATED', 401))
-      .mockResolvedValueOnce(json({ accessToken: 'token-2' }))
+      .mockResolvedValueOnce(json({ accessToken: 'token-2', user: { id: 'u', email: 'e@example.com' } }))
       .mockResolvedValueOnce(problem('UNAUTHENTICATED', 401));
 
     await expect(apiFetch('/books')).rejects.toBeInstanceOf(ApiError);
@@ -149,6 +149,48 @@ describe('apiFetch', () => {
 
     await expect(apiFetch('/books/1/accounts')).rejects.toBeInstanceOf(ApiError);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not refresh on a 401 from an auth endpoint - that 401 is about the credential just sent', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(problem('UNAUTHENTICATED', 401));
+
+    const error = await apiFetch('/auth/login', { method: 'POST', body: {} }).catch(
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls.some((call) => call[0] === '/auth/refresh')).toBe(false);
+  });
+
+  it('shares one refresh between two concurrent 401s, and replays both with the new token', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(problem('UNAUTHENTICATED', 401)) // /books, initial
+      .mockResolvedValueOnce(problem('UNAUTHENTICATED', 401)) // /accounts, initial
+      .mockResolvedValueOnce(
+        json({ accessToken: 'token-2', user: { id: 'u', email: 'e@example.com' } }),
+      ) // the one refresh
+      .mockResolvedValueOnce(json([{ id: 'book-1' }])) // /books, replay
+      .mockResolvedValueOnce(json([{ id: 'account-1' }])); // /accounts, replay
+
+    setAccessToken('token-1');
+
+    const [books, accounts] = await Promise.all([
+      apiFetch('/books'),
+      apiFetch('/accounts'),
+    ]);
+
+    expect(books).toEqual([{ id: 'book-1' }]);
+    expect(accounts).toEqual([{ id: 'account-1' }]);
+
+    const refreshCalls = fetchSpy.mock.calls.filter((call) => call[0] === '/auth/refresh');
+    expect(refreshCalls).toHaveLength(1);
+
+    const replayHeaders = fetchSpy.mock.calls
+      .slice(3)
+      .map((call) => headersOf(call).get('authorization'));
+    expect(replayHeaders).toEqual(['Bearer token-2', 'Bearer token-2']);
   });
 });
 

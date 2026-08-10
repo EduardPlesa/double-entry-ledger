@@ -64,7 +64,12 @@ export async function toApiError(response: Response): Promise<ApiError> {
     });
   }
 
-  const { code, detail, requestId, errors, ...extensions } = document;
+  // `type`, `title`, `status` and `instance` are the RFC 9457 base members; `ApiError` already
+  // carries `status` on itself, and the other three are not something a caller has ever needed
+  // to branch on. Stripping all seven known members here is what makes `extensions` actually
+  // just the error-specific ones - `accountId`, `shortfall` - rather than the base document
+  // with a few fields removed.
+  const { type, title, status, instance, code, detail, requestId, errors, ...extensions } = document;
 
   return new ApiError({
     status: response.status,

@@ -115,8 +115,25 @@ describe('the books screen', () => {
 
 describe('a session lost mid-flight', () => {
   it('returns to the login form when the books query 401s and the refresh fails too', async () => {
-    signedIn();
+    // The refresh handler is stateful rather than swapped out with a second `server.use()`
+    // after `render`: MSW picks a handler at interception time, not at call time, so a handler
+    // registered after `render` races the boot refresh's own request instead of deterministically
+    // following it. Succeeding once and refusing thereafter makes the sequence exact: the boot
+    // refresh (call 1) succeeds, so the screen mounts and its books query runs; that query's 401
+    // triggers `apiFetch`'s own refresh (call 2), which this handler now refuses, and the guard
+    // sends the app back to `/login`.
+    let refreshCalls = 0;
     server.use(
+      http.post('/auth/refresh', () => {
+        refreshCalls += 1;
+        if (refreshCalls === 1) {
+          return HttpResponse.json({ accessToken: 'access-token', user: USER });
+        }
+        return HttpResponse.json(
+          { status: 401, code: 'UNAUTHENTICATED', detail: 'dead cookie', requestId: 'req-y' },
+          { status: 401, headers: { 'content-type': 'application/problem+json' } },
+        );
+      }),
       http.get('/books', () =>
         HttpResponse.json(
           { status: 401, code: 'UNAUTHENTICATED', detail: 'expired', requestId: 'req-x' },
@@ -127,18 +144,7 @@ describe('a session lost mid-flight', () => {
 
     render(<App />);
 
-    // The boot refresh succeeds, so the screen mounts and its query runs; that query's 401
-    // triggers a second refresh, which the default handler refuses. Nothing here clicks
-    // anything - the screen querying on mount is what makes the dead session observable.
-    server.use(
-      http.post('/auth/refresh', () =>
-        HttpResponse.json(
-          { status: 401, code: 'UNAUTHENTICATED', detail: 'dead cookie', requestId: 'req-y' },
-          { status: 401, headers: { 'content-type': 'application/problem+json' } },
-        ),
-      ),
-    );
-
     expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument();
+    expect(refreshCalls).toBe(2);
   });
 });

@@ -71,7 +71,10 @@ describe('toApiError', () => {
   it('keeps extension members, so a caller can read the overdraft shortfall', async () => {
     const error = await toApiError(
       problemResponse({
+        type: 'https://ledger.local/problems/account-overdrawn',
+        title: 'Account overdrawn',
         status: 422,
+        instance: '/books/1/entries',
         code: 'ACCOUNT_OVERDRAWN',
         detail: 'overdrawn',
         requestId: 'req-1',
@@ -81,5 +84,17 @@ describe('toApiError', () => {
     );
 
     expect(error.extensions.accountId).toBe('acc-1');
+    expect(error.extensions.shortfall).toEqual({ currency: 'EUR', amount: '5.00' });
+
+    // The RFC 9457 base members are already their own fields on the error - `status` most of
+    // all, since `error.status` and a lingering `error.extensions.status` disagreeing would be
+    // exactly the kind of bug this stripping exists to prevent.
+    expect(error.extensions).not.toHaveProperty('type');
+    expect(error.extensions).not.toHaveProperty('title');
+    expect(error.extensions).not.toHaveProperty('status');
+    expect(error.extensions).not.toHaveProperty('instance');
+    expect(error.extensions).not.toHaveProperty('code');
+    expect(error.extensions).not.toHaveProperty('detail');
+    expect(error.extensions).not.toHaveProperty('requestId');
   });
 });
