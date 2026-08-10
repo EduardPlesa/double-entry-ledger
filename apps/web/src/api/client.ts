@@ -17,6 +17,12 @@ import { getAccessToken, refreshSession } from './session';
  *   the key          `Idempotency-Key` passes through unchanged on the replay. A retry that
  *                    mints a new key is not a retry, it is a second request, which is the
  *                    exact failure the header exists to prevent.
+ *
+ * A 401 from a path under `/auth/` is exempt from the retry. `/auth/login` answering 401 is not
+ * an expired access token - there is no access token in play yet - it is an answer about the
+ * credential the caller just submitted. Refreshing there would rotate the refresh token on
+ * every mistyped password and, with a dead refresh cookie, would sign a genuinely signed-in
+ * user out for typing their password wrong once.
  */
 
 export interface RequestOptions {
@@ -34,9 +40,9 @@ export function newIdempotencyKey(): string {
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const response = await send(path, options);
 
-  if (response.status === 401) {
-    const token = await refreshSession();
-    if (token === null) throw await toApiError(response);
+  if (response.status === 401 && !path.startsWith('/auth/')) {
+    const session = await refreshSession();
+    if (session === null) throw await toApiError(response);
 
     const replay = await send(path, options);
     if (!replay.ok) throw await toApiError(replay);

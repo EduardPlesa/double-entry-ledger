@@ -14,6 +14,19 @@
  * family. Concurrent callers therefore share one in-flight promise, and the second caller
  * getting the first caller's token is the correct outcome, not a shortcut.
  *
+ * That single flight is per tab, not per browser. Two tabs of the same session waking together
+ * - from sleep, from being restored - each hold their own module instance of this file and can
+ * both present the same refresh cookie in the same instant. One wins the compare-and-swap in
+ * `apps/api/src/services/auth.service.ts`; the other looks exactly like reuse, and reuse
+ * revokes the whole token family, signing both tabs out. `auth.service.ts`'s own docblock
+ * names "two browser tabs waking together" as a cost it accepts deliberately, and this module
+ * is where that acceptance becomes concrete: the guarantee here is one refresh per tab, never
+ * one refresh per browser. Coordinating across tabs - so only one of them ever calls
+ * `/auth/refresh` - would need the Web Locks API or a `BroadcastChannel` election, and this
+ * stage does not build either. A user who keeps two tabs open and lets both go idle past the
+ * access token's lifetime will occasionally see both signed out at once; that is a known limit,
+ * not a bug to file.
+ *
  * This module must not import the API client. The client calls `refreshSession` when it sees
  * a 401; a refresh routed back through the client would recurse through its own 401 handler.
  */
@@ -23,9 +36,13 @@ export interface SessionUser {
   readonly email: string;
 }
 
+export interface Session {
+  readonly token: string;
+  readonly user: SessionUser;
+}
+
 let accessToken: string | null = null;
-let currentUser: SessionUser | null = null;
-let inFlight: Promise<string | null> | null = null;
+let inFlight: Promise<Session | null> | null = null;
 
 const listeners = new Set<() => void>();
 
@@ -37,23 +54,19 @@ export function setAccessToken(token: string | null): void {
   accessToken = token;
 }
 
-/**
- * Whoever the last refresh answered with.
- *
- * `POST /auth/refresh` returns the user alongside the token, so recording it here costs
- * nothing and saves the boot path an identical second call to learn who it just refreshed.
- */
-export function getSessionUser(): SessionUser | null {
-  return currentUser;
-}
-
 /** Called when the refresh cookie is dead: expired, rotated away, or revoked with its family. */
 export function onSessionLost(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
-export async function refreshSession(): Promise<string | null> {
+/**
+ * Redeems the refresh cookie for a new access token and the identity it belongs to.
+ *
+ * `POST /auth/refresh` returns the user alongside the token in one body, so this returns both
+ * rather than making a caller that needs to know who signed in make a second, identical call.
+ */
+export async function refreshSession(): Promise<Session | null> {
   inFlight ??= runRefresh().finally(() => {
     inFlight = null;
   });
@@ -61,7 +74,7 @@ export async function refreshSession(): Promise<string | null> {
   return inFlight;
 }
 
-async function runRefresh(): Promise<string | null> {
+async function runRefresh(): Promise<Session | null> {
   try {
     const response = await fetch('/auth/refresh', {
       method: 'POST',
@@ -74,13 +87,13 @@ async function runRefresh(): Promise<string | null> {
     if (!response.ok) return loseSession();
 
     const body: unknown = await response.json();
-    const { accessToken: token, user } = body as { accessToken?: unknown; user?: unknown };
+    const { accessToken: token, user: rawUser } = body as { accessToken?: unknown; user?: unknown };
+    const user = sessionUserOf(rawUser);
 
-    if (typeof token !== 'string') return loseSession();
+    if (typeof token !== 'string' || user === null) return loseSession();
 
     accessToken = token;
-    currentUser = sessionUserOf(user);
-    return token;
+    return { token, user };
   } catch {
     // A network failure is indistinguishable from a dead cookie from here, and treating it as
     // a thrown error would make every caller handle it. The user is signed out; if the
@@ -91,7 +104,6 @@ async function runRefresh(): Promise<string | null> {
 
 function loseSession(): null {
   accessToken = null;
-  currentUser = null;
   for (const listener of listeners) listener();
   return null;
 }
