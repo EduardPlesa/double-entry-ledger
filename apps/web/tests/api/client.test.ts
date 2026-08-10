@@ -17,7 +17,7 @@ function problem(code: string, status: number): Response {
   });
 }
 
-function headersOf(call: readonly [unknown, RequestInit | undefined] | undefined): Headers {
+function headersOf(call: Parameters<typeof fetch> | undefined): Headers {
   return new Headers(call?.[1]?.headers);
 }
 
