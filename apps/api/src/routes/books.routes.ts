@@ -1,7 +1,19 @@
+import {
+  bookResource,
+  createBookInput,
+  issuedApiKeyResource,
+  membershipResource,
+} from '@ledger/shared';
 import type { RequestHandler } from 'express';
+import { z } from 'zod';
 import { ApiKeyNotPermittedError } from '../domain/errors.js';
 import { bookAccessOf, principalOf } from '../http/context.js';
-import { toBookResource, type BookService } from '../services/book.service.js';
+import {
+  grantRoleSchema,
+  issueApiKeySchema,
+  toBookResource,
+  type BookService,
+} from '../services/book.service.js';
 import type { RouteDefinition } from './registry.js';
 
 /**
@@ -80,12 +92,18 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       });
   };
 
+  // The guard resolves `:bookId` through `uuidPathParam` before any of these run, so the
+  // params schema below declares a rule it does not itself enforce. See `RouteDefinition`.
+  const bookPath = { params: z.object({ bookId: z.uuid() }) };
+
   return [
     {
       method: 'post',
       path: '/books',
       access: { kind: 'authenticated' },
       summary: 'Create a book, owned by the caller',
+      request: { body: createBookInput },
+      response: { status: 201, schema: bookResource },
       handler: createBook,
     },
     {
@@ -93,6 +111,7 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       path: '/books',
       access: { kind: 'authenticated' },
       summary: 'List the books this caller can reach',
+      response: { status: 200, schema: z.array(bookResource) },
       handler: listBooks,
     },
     {
@@ -100,6 +119,8 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       path: '/books/:bookId/members',
       access: { kind: 'book', permission: 'member:manage', bookFrom: 'param' },
       summary: 'Grant or change a member’s role',
+      request: { ...bookPath, body: grantRoleSchema },
+      response: { status: 200, schema: membershipResource },
       handler: addMember,
     },
     {
@@ -107,6 +128,8 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       path: '/books/:bookId/api-keys',
       access: { kind: 'book', permission: 'member:manage', bookFrom: 'param' },
       summary: 'Issue an API key scoped to this book',
+      request: { ...bookPath, body: issueApiKeySchema },
+      response: { status: 201, schema: issuedApiKeyResource },
       handler: issueApiKey,
     },
   ];

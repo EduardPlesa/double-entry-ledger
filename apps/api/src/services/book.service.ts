@@ -30,7 +30,7 @@ import type {
 
 export type { CreateBookInput };
 
-const grantRoleSchema = z.object({
+export const grantRoleSchema = z.object({
   /**
    * By email rather than by user id. A caller adding a colleague knows their address and has
    * no way to discover their id - and an endpoint that accepted ids would be an endpoint that
@@ -42,7 +42,7 @@ const grantRoleSchema = z.object({
 
 export type GrantRoleInput = z.input<typeof grantRoleSchema>;
 
-const issueApiKeySchema = z.object({
+export const issueApiKeySchema = z.object({
   name: z.string().trim().min(1, 'must not be blank').max(200),
   role: z.enum(BOOK_ROLES),
 });

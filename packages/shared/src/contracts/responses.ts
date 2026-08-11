@@ -55,6 +55,55 @@ export const bookResource = z.object({
 
 export type BookResource = z.infer<typeof bookResource>;
 
+/**
+ * A membership after it was granted or changed.
+ *
+ * The email is echoed back because the request named the member by address and the response
+ * has to say which user that resolved to - the caller has no other way to find out, and no
+ * endpoint hands out user ids.
+ */
+export const membershipResource = z.object({
+  bookId: z.uuid(),
+  userId: z.uuid(),
+  email: z.string(),
+  role: z.enum(BOOK_ROLES),
+});
+
+export type MembershipResource = z.infer<typeof membershipResource>;
+
+export const issuedApiKeyResource = z.object({
+  id: z.uuid(),
+  bookId: z.uuid(),
+  name: z.string(),
+  role: z.enum(BOOK_ROLES),
+  prefix: z.string().describe('The leading segment of the token, stored so a key can be identified in a list.'),
+  token: z
+    .string()
+    .describe(
+      'The plaintext key. Returned once, here, and never again: what is stored is a SHA-256 ' +
+        'hash, so there is nothing left to show on a later request.',
+    ),
+  warning: z.string(),
+});
+
+export type IssuedApiKeyResource = z.infer<typeof issuedApiKeyResource>;
+
+/**
+ * What the four auth endpoints return.
+ *
+ * The access token is in the body; the refresh token is not, and is set as an httpOnly cookie
+ * the response body never names. `expiresAt` is the access token's, so a client can schedule a
+ * refresh without decoding a JWT it is not supposed to inspect.
+ */
+export const sessionResource = z.object({
+  accessToken: z.string(),
+  tokenType: z.literal('Bearer'),
+  expiresAt: timestamp,
+  user: z.object({ id: z.uuid(), email: z.string() }),
+});
+
+export type SessionResource = z.infer<typeof sessionResource>;
+
 export const accountResource = z.object({
   id: z.uuid(),
   bookId: z.uuid(),
