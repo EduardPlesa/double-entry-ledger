@@ -31,6 +31,9 @@ export interface RequestOptions {
   /** Book-scoped POSTs only; the API rejects the header where it cannot honour it. */
   readonly idempotencyKey?: string;
   readonly signal?: AbortSignal;
+  /** Called with the status of a successful response. The 200-vs-201 distinction on a POST
+   *  is a real answer about what happened, and it is lost if only the body comes back. */
+  readonly onStatus?: (status: number) => void;
 }
 
 export function newIdempotencyKey(): string {
@@ -46,10 +49,12 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 
     const replay = await send(path, options);
     if (!replay.ok) throw await toApiError(replay);
+    options.onStatus?.(replay.status);
     return readBody<T>(replay);
   }
 
   if (!response.ok) throw await toApiError(response);
+  options.onStatus?.(response.status);
   return readBody<T>(response);
 }
 
