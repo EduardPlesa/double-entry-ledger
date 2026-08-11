@@ -62,14 +62,16 @@ test('a book, an entry, and its reversal', async ({ page }) => {
   // the same path a caller in the real app takes, not a direct visit to the reverse URL.
   await page.getByRole('link', { name: 'Cash', exact: true }).click();
   await expect(page.getByText(/balance:/i)).toContainText('10.00');
-  const cashAccountId = new URL(page.url()).pathname.split('/').pop() ?? '';
 
   await page.getByRole('link', { name: 'a sale' }).click();
 
   // The preview's arithmetic is certain even though the outcome is not: one row per account
   // the entry touched, before/change/after. Cash's change is the negation of what was posted.
+  // The row is located by the account name the preview renders, not the UUID underneath it -
+  // the screen joins postings against the book's accounts precisely so a caller never has to
+  // read a UUID off this page.
   await expect(page.getByRole('row')).toHaveCount(3); // header + Cash + Sales
-  const cashReversalRow = page.getByRole('row').filter({ hasText: cashAccountId });
+  const cashReversalRow = page.getByRole('row').filter({ hasText: 'Cash' });
   await expect(cashReversalRow.getByRole('cell').nth(1)).toHaveText('10.00'); // before
   await expect(cashReversalRow.getByRole('cell').nth(2)).toHaveText('-10.00'); // change
   await expect(cashReversalRow.getByRole('cell').nth(3)).toHaveText('0.00'); // after
