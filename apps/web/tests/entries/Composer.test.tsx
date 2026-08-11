@@ -140,3 +140,120 @@ describe('the composer', () => {
     expect(screen.queryByText(/7\.00/)).not.toBeInTheDocument();
   });
 });
+
+describe('posting an entry', () => {
+  async function fillBalancedEntry() {
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/description/i), 'a sale');
+    await fillLeg(0, 'acc-cash', 'debit', '10.00');
+    await fillLeg(1, 'acc-sales', 'credit', '10.00');
+  }
+
+  it('sends debits positive and credits negative, as decimal strings', async () => {
+    let sent: { legs?: { amount: string; currency: string; accountId: string }[] } = {};
+    server.use(
+      http.post('/books/:bookId/entries', async ({ request }) => {
+        sent = (await request.json()) as typeof sent;
+        return HttpResponse.json({ id: 'entry-1' }, { status: 201 });
+      }),
+    );
+
+    await openComposer();
+    await fillBalancedEntry();
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+
+    await screen.findByText(/recorded/i);
+    expect(sent.legs).toEqual([
+      { accountId: 'acc-cash', amount: '10.00', currency: 'EUR' },
+      { accountId: 'acc-sales', amount: '-10.00', currency: 'EUR' },
+    ]);
+  });
+
+  it('carries an Idempotency-Key, and the same one on a retry', async () => {
+    const keysSeen: (string | null)[] = [];
+    server.use(
+      http.post('/books/:bookId/entries', ({ request }) => {
+        keysSeen.push(request.headers.get('idempotency-key'));
+        return keysSeen.length === 1
+          ? HttpResponse.json(
+              { status: 503, code: 'INTERNAL_ERROR', detail: 'try again', requestId: 'req-1' },
+              { status: 503, headers: { 'content-type': 'application/problem+json' } },
+            )
+          : HttpResponse.json({ id: 'entry-1' }, { status: 201 });
+      }),
+    );
+
+    await openComposer();
+    await fillBalancedEntry();
+
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+    await screen.findByText('req-1');
+
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+    await screen.findByText(/recorded/i);
+
+    expect(keysSeen).toHaveLength(2);
+    expect(keysSeen[0]).toBe(keysSeen[1]);
+    expect(keysSeen[0]).not.toBeNull();
+  });
+
+  it('says an entry already existed when the API answers 200 rather than 201', async () => {
+    server.use(
+      http.post('/books/:bookId/entries', () => HttpResponse.json({ id: 'entry-1' }, { status: 200 })),
+    );
+
+    await openComposer();
+    await fillBalancedEntry();
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+
+    expect(await screen.findByText(/already recorded/i)).toBeInTheDocument();
+  });
+
+  it('puts a rejected leg on its own row rather than in a toast', async () => {
+    server.use(
+      http.post('/books/:bookId/entries', () =>
+        HttpResponse.json(
+          {
+            status: 400,
+            code: 'VALIDATION_FAILED',
+            detail: 'invalid request body',
+            requestId: 'req-2',
+            errors: [{ path: 'legs.1.amount', message: 'must not be blank' }],
+          },
+          { status: 400, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    );
+
+    await openComposer();
+    await fillBalancedEntry();
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+
+    expect(await within(screen.getAllByRole('row')[2]!).findByText(/must not be blank/i)).toBeInTheDocument();
+  });
+
+  it('names the account and the shortfall when the entry would overdraw one', async () => {
+    server.use(
+      http.post('/books/:bookId/entries', () =>
+        HttpResponse.json(
+          {
+            status: 422,
+            code: 'ACCOUNT_OVERDRAWN',
+            detail: 'account acc-cash would be overdrawn',
+            requestId: 'req-3',
+            accountId: 'acc-cash',
+            shortfall: { currency: 'EUR', amount: '5.00' },
+          },
+          { status: 422, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    );
+
+    await openComposer();
+    await fillBalancedEntry();
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+
+    expect(await screen.findByText(/would be overdrawn/i)).toBeInTheDocument();
+    expect(screen.getByText('req-3')).toBeInTheDocument();
+  });
+});

@@ -1,13 +1,19 @@
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatMoney, negateMoney, type AccountResource, type Money } from '@ledger/shared';
 import { useAccounts } from '../accounts/useAccounts';
+import { apiFetch, newIdempotencyKey } from '../api/client';
+import { ApiError } from '../api/problem';
+import { keys } from '../api/keys';
+import { useToast } from '../toast/ToastProvider';
 import {
   canSubmit,
   currencyOf,
   imbalances,
   remainderColumn,
   remainderFor,
+  signedAmount,
   type LegRow,
 } from './legs';
 
@@ -42,6 +48,54 @@ export function Composer() {
 
   const deltas = imbalances(rows, accountsById);
   const ready = canSubmit(rows, accountsById) && description.trim() !== '';
+
+  const queryClient = useQueryClient();
+  const { showError } = useToast();
+
+  const [outcome, setOutcome] = useState<'created' | 'existing' | null>(null);
+  const [rowErrors, setRowErrors] = useState<ReadonlyMap<number, string>>(new Map());
+
+  // Minted once per composer session and held across retries. A retry that mints a new key is
+  // not a retry, it is a second entry - which is the exact failure the header exists to
+  // prevent. A new key is taken only after something is actually recorded.
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+
+  const post = useMutation({
+    mutationFn: async () => {
+      const legs = rows.map((row) => {
+        const currency = currencyOf(row, accountsById);
+        const amount = currency === null ? null : signedAmount(row, currency);
+
+        // `ready` already proved every row is usable; this is the type narrowing, not a check.
+        if (currency === null || amount === null) throw new Error('a leg was not ready to send');
+
+        return { accountId: row.accountId, amount: formatMoney(amount), currency };
+      });
+
+      return apiFetch<{ id: string }>(`/books/${bookId}/entries`, {
+        method: 'POST',
+        idempotencyKey,
+        body: { occurredAt: new Date().toISOString(), description: description.trim(), legs },
+        onStatus: (status) => { setOutcome(status === 200 ? 'existing' : 'created'); },
+      });
+    },
+    onSuccess: async () => {
+      setRowErrors(new Map());
+      setIdempotencyKey(newIdempotencyKey());
+      setRows([EMPTY_ROW, EMPTY_ROW]);
+      setDescription('');
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: keys.trialBalance(bookId, null) }),
+        queryClient.invalidateQueries({ queryKey: keys.accounts(bookId) }),
+      ]);
+    },
+    onError: (error: unknown) => {
+      const fields = fieldErrorsByRow(error);
+      setRowErrors(fields);
+      if (fields.size === 0) showError(error);
+    },
+  });
 
   // Rendered rows and the accounts they can pick from must arrive together: a heading that
   // shows before the account list does would let a caller select an account that isn't in the
@@ -99,6 +153,7 @@ export function Composer() {
               row={row}
               accounts={accountsData ?? []}
               currency={currencyOf(row, accountsById)}
+              error={rowErrors.get(index)}
               onChange={(patch) => { update(index, patch); }}
               onBalance={() => { balanceOnto(index); }}
               onRemove={rows.length > 2 ? () => { setRows((current) => current.filter((_, p) => p !== index)); } : null}
@@ -117,9 +172,19 @@ export function Composer() {
 
       <ImbalanceStrip deltas={deltas} />
 
-      <button type="submit" disabled={!ready} className="mt-4 border p-2 disabled:opacity-50">
+      <button
+        type="button"
+        disabled={!ready || post.isPending}
+        onClick={() => { post.mutate(); }}
+        className="mt-4 border p-2 disabled:opacity-50"
+      >
         Post entry
       </button>
+
+      {outcome === 'created' ? <p className="mt-2 text-sm">Entry recorded.</p> : null}
+      {outcome === 'existing' ? (
+        <p className="mt-2 text-sm">An entry with that external id was already recorded.</p>
+      ) : null}
     </main>
   );
 }
@@ -128,6 +193,7 @@ function LegFields({
   row,
   accounts,
   currency,
+  error,
   onChange,
   onBalance,
   onRemove,
@@ -135,6 +201,7 @@ function LegFields({
   row: LegRow;
   accounts: readonly AccountResource[];
   currency: string | null;
+  error?: string | undefined;
   onChange: (patch: Partial<LegRow>) => void;
   onBalance: () => void;
   onRemove: (() => void) | null;
@@ -142,6 +209,7 @@ function LegFields({
   return (
     <tr>
       <td>
+        {error === undefined ? null : <p className="text-xs text-red-600">{error}</p>}
         <select
           aria-label="Account"
           value={row.accountId}
@@ -185,6 +253,27 @@ function LegFields({
       </td>
     </tr>
   );
+}
+
+/**
+ * `legs.3.amount` becomes row 3.
+ *
+ * The server validates a list of legs; the form renders a table of rows, and they are the same
+ * list in the same order. Anything not shaped like a leg path is left for the toast.
+ */
+function fieldErrorsByRow(error: unknown): ReadonlyMap<number, string> {
+  if (!(error instanceof ApiError)) return new Map();
+
+  const byRow = new Map<number, string>();
+
+  for (const detail of error.errors) {
+    const match = /^legs\.(\d+)\./.exec(detail.path);
+    if (match?.[1] === undefined) continue;
+
+    byRow.set(Number(match[1]), detail.message);
+  }
+
+  return byRow;
 }
 
 /**
