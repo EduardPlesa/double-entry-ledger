@@ -1,8 +1,17 @@
 import '@testing-library/jest-dom/vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { server } from './msw/server';
 import { setAccessToken } from '../src/api/session';
+
+// `<option>` text is part of the DOM whether or not its `<select>` is open, so by the default
+// `ignore` list (`script, style`) any text query scanning the whole document also matches every
+// unselected option's label. That is invisible in most forms, but the composer's account picker
+// lists every account in every leg row, so a `getByText`/`findByText` for something as ordinary
+// as a currency code can collide with an account name that happens to contain it. Options never
+// read as page content the way a paragraph or a label does, so excluding them here is closer to
+// what these queries mean to assert than adding `option` to every call site would be.
+configure({ defaultIgnore: 'script, style, option' });
 
 // Two ways of faking the network coexist in this suite, and the split is deliberate rather
 // than accidental: `tests/api/client.test.ts` and `tests/api/session.test.ts` spy on
