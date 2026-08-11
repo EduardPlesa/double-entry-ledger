@@ -52,13 +52,33 @@ export function Composer() {
   const queryClient = useQueryClient();
   const { showError } = useToast();
 
-  const [outcome, setOutcome] = useState<'created' | 'existing' | null>(null);
+  const [outcome, setOutcome] = useState<'created' | null>(null);
   const [rowErrors, setRowErrors] = useState<ReadonlyMap<number, string>>(new Map());
 
-  // Minted once per composer session and held across retries. A retry that mints a new key is
-  // not a retry, it is a second entry - which is the exact failure the header exists to
-  // prevent. A new key is taken only after something is actually recorded.
+  // The key and the instant it is posted at are minted together and held across retries - but
+  // "held across retries" is only true while a retry sends the exact same body. `occurredAt` is
+  // frozen here rather than read fresh in `mutationFn`, because the API fingerprints the raw
+  // request body and compares it *before* it decides whether a stored response is replayable: a
+  // held key arriving with a body that changed (even just the timestamp) is a different request
+  // wearing the first one's key, and the server answers a permanent 409 rather than a retry.
+  //
+  // The pair is rotated in exactly two situations. Once something is actually recorded
+  // (`onSuccess`, below) - a new entry deserves a key of its own. And on the first edit to the
+  // form after a failed attempt (`attemptFailed`, tracked below) - a form the user has since
+  // changed is no longer the request the held key was minted for, and holding it across that
+  // edit would either replay the old failure's answer or throw `IDEMPOTENCY_KEY_REUSED` against
+  // a body that no longer matches. `attemptFailed` is what makes that a one-shot: it is cleared
+  // by the first edit that consumes it, so typing further does not mint a key per keystroke.
   const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
+  const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString());
+  const [attemptFailed, setAttemptFailed] = useState(false);
+
+  const rotateKeyIfStale = () => {
+    if (!attemptFailed) return;
+    setAttemptFailed(false);
+    setIdempotencyKey(newIdempotencyKey());
+    setOccurredAt(new Date().toISOString());
+  };
 
   const post = useMutation({
     mutationFn: async () => {
@@ -72,27 +92,37 @@ export function Composer() {
         return { accountId: row.accountId, amount: formatMoney(amount), currency };
       });
 
-      return apiFetch<{ id: string }>(`/books/${bookId}/entries`, {
+      await apiFetch<{ id: string }>(`/books/${bookId}/entries`, {
         method: 'POST',
         idempotencyKey,
-        body: { occurredAt: new Date().toISOString(), description: description.trim(), legs },
-        onStatus: (status) => { setOutcome(status === 200 ? 'existing' : 'created'); },
+        body: { occurredAt, description: description.trim(), legs },
       });
+
+      // Every account this entry touched, for the postings invalidation below - collected here
+      // because `rows` is reset to empty in `onSuccess` before that invalidation runs.
+      return { accountIds: [...new Set(legs.map((leg) => leg.accountId))] };
     },
-    onSuccess: async () => {
+    onSuccess: async ({ accountIds }) => {
       setRowErrors(new Map());
+      setOutcome('created');
+      setAttemptFailed(false);
       setIdempotencyKey(newIdempotencyKey());
+      setOccurredAt(new Date().toISOString());
       setRows([EMPTY_ROW, EMPTY_ROW]);
       setDescription('');
 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.trialBalance(bookId, null) }),
         queryClient.invalidateQueries({ queryKey: keys.accounts(bookId) }),
+        ...accountIds.map((accountId) =>
+          queryClient.invalidateQueries({ queryKey: keys.postings(accountId) }),
+        ),
       ]);
     },
     onError: (error: unknown) => {
       const fields = fieldErrorsByRow(error);
       setRowErrors(fields);
+      setAttemptFailed(true);
       if (fields.size === 0) showError(error);
     },
   });
@@ -109,6 +139,7 @@ export function Composer() {
   }
 
   const update = (index: number, patch: Partial<LegRow>) => {
+    rotateKeyIfStale();
     setRows((current) =>
       current.map((row, position) => (position === index ? { ...row, ...patch } : row)),
     );
@@ -122,6 +153,16 @@ export function Composer() {
     update(index, column === 'debit' ? { debit: amount, credit: '' } : { credit: amount, debit: '' });
   };
 
+  const addLeg = () => {
+    rotateKeyIfStale();
+    setRows((current) => [...current, EMPTY_ROW]);
+  };
+
+  const removeLeg = (index: number) => {
+    rotateKeyIfStale();
+    setRows((current) => current.filter((_, position) => position !== index));
+  };
+
   return (
     <main className="mx-auto mt-8 w-[52rem]">
       <h1 className="text-2xl font-semibold">New entry</h1>
@@ -130,7 +171,7 @@ export function Composer() {
         Description
         <input
           value={description}
-          onChange={(event) => { setDescription(event.target.value); }}
+          onChange={(event) => { rotateKeyIfStale(); setDescription(event.target.value); }}
           className="border p-2"
         />
       </label>
@@ -156,17 +197,13 @@ export function Composer() {
               error={rowErrors.get(index)}
               onChange={(patch) => { update(index, patch); }}
               onBalance={() => { balanceOnto(index); }}
-              onRemove={rows.length > 2 ? () => { setRows((current) => current.filter((_, p) => p !== index)); } : null}
+              onRemove={rows.length > 2 ? () => { removeLeg(index); } : null}
             />
           ))}
         </tbody>
       </table>
 
-      <button
-        type="button"
-        onClick={() => { setRows((current) => [...current, EMPTY_ROW]); }}
-        className="mt-2 border p-2 text-sm"
-      >
+      <button type="button" onClick={addLeg} className="mt-2 border p-2 text-sm">
         Add leg
       </button>
 
@@ -175,16 +212,13 @@ export function Composer() {
       <button
         type="button"
         disabled={!ready || post.isPending}
-        onClick={() => { post.mutate(); }}
+        onClick={() => { setOutcome(null); post.mutate(); }}
         className="mt-4 border p-2 disabled:opacity-50"
       >
         Post entry
       </button>
 
       {outcome === 'created' ? <p className="mt-2 text-sm">Entry recorded.</p> : null}
-      {outcome === 'existing' ? (
-        <p className="mt-2 text-sm">An entry with that external id was already recorded.</p>
-      ) : null}
     </main>
   );
 }
