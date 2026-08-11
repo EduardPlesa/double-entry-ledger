@@ -67,6 +67,23 @@ gets set on login, but the browser silently withholds it from `/api/auth/refresh
 request - every session dies at its first refresh, with nothing in the response to say why.
 Same-origin proxying also keeps the cookie's `sameSite=lax` doing the job it was chosen for.
 
+Every test in `apps/web` mocks transport except one. `apps/web/e2e/ledger.spec.ts` runs against
+the real API and a real Postgres, because the proxy forwarding paths verbatim, the refresh
+cookie's `Path=/auth` surviving that, and the silent refresh at boot that keeps a reload signed
+in are exactly the things a mock cannot reach - the browser, the proxy, and the cookie jar all
+have to actually be there. It needs the compose database rather than Testcontainers, since here
+the connection belongs to the API process the browser talks to, not to the test process:
+
+```bash
+pnpm db:up && pnpm db:migrate
+```
+
+```bash
+pnpm --filter @ledger/web e2e
+```
+
+The second command starts both the API and the web dev server itself.
+
 ## Property-based tests
 
 The suites above pin the cases someone thought of. `apps/api/tests/properties/` states the same
