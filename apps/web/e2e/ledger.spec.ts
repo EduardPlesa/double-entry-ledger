@@ -36,7 +36,11 @@ test('a book, an entry, and its reversal', async ({ page }) => {
   await page.reload();
   await expect(page.getByRole('link', { name: 'Cash' })).toBeVisible();
 
-  await page.goto(new URL(page.url()).pathname.replace('/accounts', '/entries/new'));
+  // Captured before navigating away from the tree, so the trip back doesn't depend on
+  // `page.url()` still pointing where this test last left it.
+  const treeUrl = page.url();
+
+  await page.goto(new URL(treeUrl).pathname.replace('/accounts', '/entries/new'));
   await page.getByLabel(/description/i).fill('a sale');
 
   const rows = page.getByRole('row');
@@ -48,4 +52,35 @@ test('a book, an entry, and its reversal', async ({ page }) => {
   await expect(page.getByText(/balanced/i)).toBeVisible();
   await page.getByRole('button', { name: /post entry/i }).click();
   await expect(page.getByText(/entry recorded/i)).toBeVisible();
+
+  // Back to the tree: the posting already moved Cash's balance.
+  await page.goto(new URL(treeUrl).pathname);
+  const cashTreeRow = page.locator('li').filter({ hasText: 'Cash' }).first();
+  await expect(cashTreeRow).toContainText('10.00');
+
+  // Follow Cash to its own detail screen, then the posting's description to the reversal -
+  // the same path a caller in the real app takes, not a direct visit to the reverse URL.
+  await page.getByRole('link', { name: 'Cash', exact: true }).click();
+  await expect(page.getByText(/balance:/i)).toContainText('10.00');
+  const cashAccountId = new URL(page.url()).pathname.split('/').pop() ?? '';
+
+  await page.getByRole('link', { name: 'a sale' }).click();
+
+  // The preview's arithmetic is certain even though the outcome is not: one row per account
+  // the entry touched, before/change/after. Cash's change is the negation of what was posted.
+  await expect(page.getByRole('row')).toHaveCount(3); // header + Cash + Sales
+  const cashReversalRow = page.getByRole('row').filter({ hasText: cashAccountId });
+  await expect(cashReversalRow.getByRole('cell').nth(1)).toHaveText('10.00'); // before
+  await expect(cashReversalRow.getByRole('cell').nth(2)).toHaveText('-10.00'); // change
+  await expect(cashReversalRow.getByRole('cell').nth(3)).toHaveText('0.00'); // after
+
+  await page.getByRole('button', { name: /reverse this entry/i }).click();
+  await expect(page.getByText(/entry reversed/i)).toBeVisible();
+
+  // The property worth having: a reversal leaves the book exactly as balanced as it found it.
+  // Cash is back to zero, and the report carries no "does not balance" alert.
+  await page.goto(new URL(treeUrl).pathname.replace('/accounts', '/trial-balance'));
+  await expect(page.getByText(/does not balance/i)).toHaveCount(0);
+  const cashBalanceRow = page.locator('tr').filter({ hasText: 'Cash' }).first();
+  await expect(cashBalanceRow).toContainText('0.00');
 });
