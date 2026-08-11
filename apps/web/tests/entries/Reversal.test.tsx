@@ -1,8 +1,10 @@
+import { QueryClient } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/App';
+import { keys } from '../../src/api/keys';
 import { server } from '../msw/server';
 import { ENTRY, USER } from '../msw/handlers';
 
@@ -44,7 +46,7 @@ describe('the reversal flow', () => {
     expect(screen.getByText('1190.00')).toBeInTheDocument();
   });
 
-  it('warns when a projected balance goes negative, without promising a refusal', async () => {
+  it('warns when a projected balance goes negative, naming the account rather than saying "one of these"', async () => {
     server.use(
       http.get('/books/:bookId/trial-balance', () =>
         HttpResponse.json({
@@ -60,6 +62,24 @@ describe('the reversal flow', () => {
     await openReversal();
 
     expect(await screen.findByText(/may refuse/i)).toBeInTheDocument();
+    expect(screen.getByText(/Cash would go negative/i)).toBeInTheDocument();
+  });
+
+  it('names the accounts in the preview instead of their ids', async () => {
+    await openReversal();
+
+    expect(await screen.findByText('Cash')).toBeInTheDocument();
+    expect(screen.getByText('Sales')).toBeInTheDocument();
+    expect(screen.queryByText('acc-cash')).not.toBeInTheDocument();
+    expect(screen.queryByText('acc-sales')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the id when the account is not in the book\'s accounts list', async () => {
+    server.use(http.get('/books/:bookId/accounts', () => HttpResponse.json([])));
+
+    await openReversal();
+
+    expect(await screen.findByText('acc-cash')).toBeInTheDocument();
   });
 
   it('refuses to offer a reversal for an entry already reversed', async () => {
@@ -111,5 +131,30 @@ describe('the reversal flow', () => {
 
     expect(await screen.findByText(/would be overdrawn/i)).toBeInTheDocument();
     expect(screen.getByText('req-rev')).toBeInTheDocument();
+  });
+
+  it('invalidates the entry, the accounts, the trial balance, and the postings of every affected account', async () => {
+    // A stale `keys.entry` is exactly what `reversedBy` was added to prevent - returning to this
+    // screen must see the reversal, not re-offer a button whose only outcome is
+    // ENTRY_ALREADY_REVERSED. `staleTime: 30_000` means "invalidate" is the only thing standing
+    // between a successful reversal and half a minute of pre-reversal balances everywhere else.
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    server.use(
+      http.post('/entries/:entryId/reverse', () => HttpResponse.json({ id: 'entry-2' }, { status: 201 })),
+    );
+
+    await openReversal();
+    await userEvent.click(await screen.findByRole('button', { name: /reverse this entry/i }));
+    await screen.findByText(/entry reversed/i);
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(([filters]) => filters?.queryKey);
+
+    expect(invalidatedKeys).toContainEqual(keys.entry('entry-1'));
+    expect(invalidatedKeys).toContainEqual(keys.accounts('book-1'));
+    expect(invalidatedKeys).toContainEqual(keys.trialBalance('book-1', null));
+    expect(invalidatedKeys).toContainEqual(keys.postings('acc-cash'));
+    expect(invalidatedKeys).toContainEqual(keys.postings('acc-sales'));
+
+    invalidateSpy.mockRestore();
   });
 });
