@@ -1,5 +1,11 @@
 import { http, HttpResponse } from 'msw';
-import type { AccountResource, BookResource, TrialBalanceResource } from '@ledger/shared';
+import type {
+  AccountResource,
+  BalanceResource,
+  BookResource,
+  PostingPageResource,
+  TrialBalanceResource,
+} from '@ledger/shared';
 
 export const USER = { id: 'user-1', email: 'owner@example.com' };
 
@@ -45,6 +51,47 @@ export const TRIAL_BALANCE: TrialBalanceResource = {
   balanced: true,
 };
 
+export const POSTINGS_PAGE_ONE: PostingPageResource = {
+  accountId: 'acc-cash',
+  items: [
+    {
+      id: '1',
+      entryId: 'entry-1',
+      occurredAt: '2026-03-01T12:00:00.000Z',
+      recordedAt: '2026-03-01T12:00:00.000Z',
+      description: 'a sale',
+      amount: '10.00',
+      runningBalance: '10.00',
+      currency: 'EUR',
+    },
+  ],
+  nextCursor: 'cursor-2',
+};
+
+export const POSTINGS_PAGE_TWO: PostingPageResource = {
+  accountId: 'acc-cash',
+  items: [
+    {
+      id: '2',
+      entryId: 'entry-2',
+      occurredAt: '2026-03-02T12:00:00.000Z',
+      recordedAt: '2026-03-02T12:00:00.000Z',
+      description: 'rent',
+      amount: '-4.00',
+      runningBalance: '6.00',
+      currency: 'EUR',
+    },
+  ],
+  nextCursor: null,
+};
+
+export const BALANCE: BalanceResource = {
+  accountId: 'acc-cash',
+  asOf: null,
+  balance: '6.00',
+  currency: 'EUR',
+};
+
 function session() {
   return HttpResponse.json({
     accessToken: 'access-token',
@@ -69,4 +116,9 @@ export const handlers = [
   http.get('/books', () => HttpResponse.json(BOOKS)),
   http.get('/books/:bookId/accounts', () => HttpResponse.json(ACCOUNTS)),
   http.get('/books/:bookId/trial-balance', () => HttpResponse.json(TRIAL_BALANCE)),
+  http.get('/accounts/:accountId/postings', ({ request }) => {
+    const cursor = new URL(request.url).searchParams.get('cursor');
+    return HttpResponse.json(cursor === null ? POSTINGS_PAGE_ONE : POSTINGS_PAGE_TWO);
+  }),
+  http.get('/accounts/:accountId/balance', () => HttpResponse.json(BALANCE)),
 ];
