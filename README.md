@@ -1,10 +1,17 @@
 # Double-entry ledger
 
-A double-entry accounting ledger. Portfolio project: not deployed anywhere, but built to
-production standards.
+A double-entry accounting ledger with an HTTP API and a web frontend. Portfolio project: not
+deployed anywhere, but built to production standards.
 
-Stages 1 and 2 are complete: the schema and the invariants the *database* enforces, then
-the config module and the ledger service. There is no HTTP layer yet — that is stage 3.
+What is here: books and accounts, balanced entries, reversals, balances and a trial balance,
+paged postings with a running balance. Cookie sessions and API keys, role-based authorization,
+row-level security per book. Idempotent writes behind `Idempotency-Key`. An overdraft rule
+enforced over *every prefix* of a guarded account's history, not merely its final balance.
+Balance checkpoints so a balance does not have to be re-derived from the first posting every
+time. An OpenAPI 3.1 document generated from the same schemas the handlers parse, served at
+`/docs`.
+
+What is not here is in [docs/limitations.md](docs/limitations.md), stated plainly.
 
 ## Invariants
 
@@ -18,7 +25,53 @@ the config module and the ledger service. There is no HTTP layer yet — that is
 Invariant 1 lives in a deferred constraint trigger; invariant 2 lives in both a `REVOKE`
 against the runtime role and a trigger that binds even the schema owner. See
 [`0003_invariants.sql`](apps/api/drizzle/0003_invariants.sql) for why a `CHECK` constraint
-cannot express invariant 1.
+cannot express invariant 1, and [docs/database.md](docs/database.md) for the rest of the schema.
+
+## Decisions & tradeoffs
+
+Each of these has an ADR. The short version is here; the argument, the alternative that was
+rejected and the cost being carried are there.
+
+**The invariants live in the database.** Constraint triggers, revoked privileges and row-level
+security rather than application checks alone. The alternative — enforcing them in the service —
+is bypassed by a `psql` session, a migration, a second service or a bug. It costs a test suite
+that needs Docker, and errors that arrive as SQLSTATEs needing translation.
+[ADR 0001](docs/adr/0001-invariants-in-the-database.md)
+
+**Money is a `bigint` in minor units, a decimal string on the wire.** Not a float, which cannot
+represent money, and not a JSON number, whose 53 bits of mantissa cannot hold every value this
+ledger can. It costs a `::text` cast on every SQL aggregate and an explicit serializer per
+resource, because JSON has no bigint. [ADR 0002](docs/adr/0002-money-as-minor-units.md)
+
+**Idempotency keys live in Postgres, not Redis.** The boring option. Redis would have brought a
+free TTL and one round trip; it also brings a second datastore whose "this call succeeded" can
+disagree with the ledger's "this entry exists". It costs rows nobody prunes and contention on the
+same database as the write. [ADR 0003](docs/adr/0003-idempotency-in-postgres.md)
+
+**Row locks, not `SERIALIZABLE`, for the overdraft rule.** The prefix rule reads an account's
+whole posting range, which is the shape SSI handles worst: measured, every contested writer
+aborted to the retry cap and got a serialization failure instead of the 422 the domain has an
+answer for. Row locks turn the same contention into waiting. It costs a lock held across a scan
+that grows with the ledger. [ADR 0004](docs/adr/0004-concurrency-control.md)
+
+**Balance checkpoints keyed on posting id, refreshed by hand.** A date key would be wrong the
+first time somebody backdates an entry. The watermark is only sound because every write locks
+every account it touches — which is what this decision cost the write path. Nothing schedules the
+refresh, and a stale checkpoint is slower rather than wrong.
+[ADR 0005](docs/adr/0005-balance-checkpoints.md)
+
+Two more shape the codebase without an ADR of their own:
+
+**The route registry is the only place a route can exist.** `apps/api/src/routes/registry.ts`
+is a table of every route with its access requirement, its schemas and its handler; `http/app.ts`
+walks it and nothing else. A route that is not in it is not served, and a meta-test compares the
+table against what Express actually registered, in both directions. The same rows are what the
+OpenAPI document is generated from, so the published spec cannot describe a route that does not
+exist or omit one that does.
+
+**Balances are derived, never stored.** There is no balance column to drift from the postings.
+Checkpoints are a resumption point with an always-correct sum-from-zero path retained beside
+them, and a property test asserts the two agree over arbitrary histories.
 
 ## Running it
 
@@ -67,11 +120,7 @@ gets set on login, but the browser silently withholds it from `/api/auth/refresh
 request - every session dies at its first refresh, with nothing in the response to say why.
 Same-origin proxying also keeps the cookie's `sameSite=lax` doing the job it was chosen for.
 
-Every test in `apps/web` mocks transport except one. `apps/web/e2e/ledger.spec.ts` runs against
-the real API and a real Postgres, because the proxy forwarding paths verbatim, the refresh
-cookie's `Path=/auth` surviving that, and the silent refresh at boot that keeps a reload signed
-in are exactly the things a mock cannot reach - the browser, the proxy, and the cookie jar all
-have to actually be there. It needs the compose database rather than Testcontainers, since here
+The browser end-to-end test needs the compose database rather than Testcontainers, since there
 the connection belongs to the API process the browser talks to, not to the test process:
 
 ```bash
@@ -82,83 +131,58 @@ pnpm db:up && pnpm db:migrate
 pnpm --filter @ledger/web e2e
 ```
 
-The second command starts both the API and the web dev server itself.
+That command starts both the API and the web dev server itself.
 
-## Property-based tests
+Four scripts are for the parts of the system that are not a request:
 
-The suites above pin the cases someone thought of. `apps/api/tests/properties/` states the same
-invariants as fast-check properties and lets the generator look for the cases nobody thought of —
-against the real database, because half of what this project asserts is enforced in migrations
-rather than in TypeScript.
+```bash
+pnpm --filter @ledger/api openapi
+```
 
-An `fc.commands` sequence drives `LedgerService` — post, reverse, read a balance, page through
-postings, read the trial balance — while an in-memory model is advanced alongside it. After every
-command:
+```bash
+pnpm --filter @ledger/api checkpoint <bookId>
+```
 
-1. the book sums to zero in every currency
-2. every balance equals the sum of that account's own postings
-3. the trial balance agrees account by account, and its per-currency totals match the model's
-4. no guarded account's minimum running balance is below zero — computed twice, once by a SQL
-   window function and once by an array scan, which is what pins the `(occurred_at, id)`
-   tiebreaker
-5. a reversal changes each affected balance by exactly the negation of the original's legs
+```bash
+pnpm --filter @ledger/api perf:seed --postings 500000
+```
 
-The model **follows**: it records what the service accepted and never predicts a refusal, so the
-overdraft rule is not written a third time after migration `0007` and the service. The price is
-that a service refusing everything would satisfy all five, so a sixth invariant asserts the one
-class of entry that is *provably* acceptable — one carrying no negative leg on a guarded account
-cannot lower any prefix — and a tally across the run asserts acceptances stay the clear majority.
-The fixture's opening balance is tuned against that tally by measurement, not by taste: too
-generous and nothing is ever refused, too thin and the majority assertion fails.
+```bash
+pnpm --filter @ledger/api perf:explain
+```
 
-`LEDGER_PROPERTY_RUNS` sets the case count, defaulting to 25 so `pnpm test` stays usable. A pass
-at 200 takes about two minutes.
+`openapi` regenerates [docs/openapi.json](docs/openapi.json), which a test compares against what
+the running application would serve. `checkpoint` refreshes every checkpoint in a book — nothing
+else does. `perf:seed` and `perf:explain` are how the numbers in
+[docs/performance.md](docs/performance.md) were taken.
 
-### What it found
+The API serves the same document at `/docs/openapi.json`, and `/docs` renders it as a page.
 
-An amount above `2^63 − 1` — the ceiling of the `bigint` column that stores minor units — passes
-every validation layer and then answers **HTTP 500**. `amount` is typed only as a string,
-`parseMoney` checks decimal shape and non-zero but never magnitude, and no domain error covers the
-case, so the request reaches the error middleware's catch-all and is logged as an unanticipated
-bug. That middleware special-cases malformed JSON precisely because it would otherwise be "a 500
-for what is unambiguously a client mistake"; an out-of-range amount is the same category and gets
-none of the same treatment. From the caller's side it is indistinguishable from a server fault.
+## Where things are documented
 
-No example test would have found it, because nobody writes `9223372036854775808` by hand. The
-generator did, on its first run. The fix is production code and belongs to a later stage; the
-boundary property is bounded at the real ceiling meanwhile, with the reason stated at the constant.
-
-### The corpus
-
-`apps/api/tests/properties/regressions.ts` holds counterexamples this suite has found,
-transcribed and replayed on every run through fast-check's `examples` option — which, unlike a
-recorded seed, states what it defends against and survives the generators being rewritten.
-
-It is currently empty, and deliberately so. The one defect above cannot be expressed as an entry:
-the generator is now bounded below that ceiling, and a case the generator cannot produce cannot be
-replayed. Nothing was planted here to demonstrate the mechanism.
-
-### Query counting
-
-`apps/api/tests/services/query-count.test.ts` measures the statements a read path actually sends,
-counting at the driver rather than through the ORM — `BEGIN`, `set_config` and `COMMIT` are round
-trips too. It asserts that `listPostings` sends the same statements for a page of 1 as for a page
-of 50, and that the trial balance is invariant to how many accounts a book has.
-
-An N+1 returns exactly the right answer, just once per row, so it is invisible to every other test
-here. The exact counts are pinned beside the invariance assertions, with each statement named, so
-that replacing one is a deliberate edit rather than a silent drift.
+- [docs/database.md](docs/database.md) — the schema, the two roles, and where each invariant is
+  enforced.
+- [docs/testing.md](docs/testing.md) — the four test projects, the property suite and what it
+  found, query counting, the contract and route meta-tests.
+- [docs/performance.md](docs/performance.md) — `EXPLAIN ANALYZE` at 500,000 postings, either side
+  of the index migration, including the query the index makes slower.
+- [docs/limitations.md](docs/limitations.md) — what is missing, what it costs, what fixing it
+  would take.
+- [docs/adr/](docs/adr/) — the five decisions above, in full.
+- [docs/openapi.json](docs/openapi.json), or `/docs` on a running server — the API.
 
 ## Layout
 
 ```
 apps/api/src/config.ts          the only place process.env is read
+apps/api/src/routes/registry.ts the table every route has to be in
 apps/api/src/services           business rules: no Express, no SQL
 apps/api/src/repositories       data access: no business rules
+apps/api/src/openapi            the document, generated from the registry
 apps/api/src/db                 pool, transactions, schema, migrations
 apps/api/src/composition.ts     the one place interfaces meet implementations
-apps/web                        the SPA: session, the book picker, and the forms behind them
-packages/shared                 Money, Clock, ids — both sides import these
+apps/web                        the SPA: session, accounts, the composer, the reports
+packages/shared                 Money, Clock, ids, and both halves of the contract
 docker/initdb                   cluster bootstrap: role creation and credentials
 ```
 
@@ -169,11 +193,12 @@ the common authoring mistake fails before a transaction is opened and with an er
 the currency and the amount. The database's deferred trigger remains the enforcement that
 matters: it binds every writer, including a future version of this service with a bug in it.
 
-`getBalance` sums postings from zero, every time. It is naive and correct by construction —
-nothing can drift from a value that is never stored. `asOf` filters on `occurred_at`, when
-the transaction happened in the world, so a backdated entry changes the answer to a question
-about last March. Stage 7 adds checkpoints keyed on posting id, and a test asserting the two
-paths always agree.
+`getBalance` resumes from a checkpoint where one exists and helps, and sums from zero otherwise.
+The sum-from-zero path is naive and correct by construction — nothing can drift from a value that
+is never stored — and it is retained precisely so the checkpoint has something to be checked
+against. `asOf` filters on `occurred_at`, when the transaction happened in the world, so a
+backdated entry changes the answer to a question about last March; a checkpoint cannot help
+there, because it carries no information about the dates of the postings it summed.
 
 `listPostings` pages by posting id — a bigserial, so a keyset cursor needs no tiebreaker and
 cannot skip or repeat a row — and carries a running balance across pages, in a fixed number
@@ -184,13 +209,13 @@ duplicate or a conflict. The race between two concurrent posts of one `external_
 resolved by the unique index and recovered from by re-reading the winner's row; a test fires
 three at once.
 
-The request schemas that validate `postEntry` and its neighbours, and the response types that
-`apps/api/src/http/serialize.ts` produces from them, now live in `packages/shared` rather than
-in this service. Stage 6's frontend gates its submit button on the same zero-sum rule this
-service enforces, and it needs to ask that question before a request round-trips to the
-server. Two copies of that rule, one in each app, would eventually disagree — and the
-direction they'd disagree in is the frontend offering a button whose submission the service
-was always going to reject.
+The request schemas that validate `postEntry` and its neighbours, and the response schemas
+`apps/api/src/http/serialize.ts` produces values for, live in `packages/shared`. The frontend
+gates its submit button on the same zero-sum rule this service enforces, and it needs to ask that
+question before a request round-trips to the server. Two copies of that rule, one in each app,
+would eventually disagree — and the direction they'd disagree in is the frontend offering a
+button whose submission the service was always going to reject. The same schemas are what the
+OpenAPI document publishes.
 
 ## Money, and the boundary
 
@@ -218,20 +243,14 @@ at their defaults.
 
 `LEDGER_CONCURRENCY_STRATEGY` is the one worth knowing about here. It selects how the
 overdraft rule is kept true when two writers meet — `row-lock` (the default, and what ships)
-takes `SELECT ... FOR NO KEY UPDATE` on the accounts an entry draws from, so writers block;
+takes `SELECT ... FOR NO KEY UPDATE` on the accounts an entry touches, so writers block;
 `serializable` drops the explicit locks, runs the transaction at `SERIALIZABLE` and retries
 on `40001`, so writers abort and try again. Both enforce the rule exactly and admit the same
 number of concurrent withdrawals; they differ in what the losers are told, and that difference
 is not merely cosmetic. Nothing translates an exhausted `40001` into a domain error, so under
 `serializable` a contested withdrawal that `row-lock` answers with a 422 `ACCOUNT_OVERDRAWN`
-instead exhausts `DrizzleUnitOfWork`'s retries and reaches the client as a 500. That is why
-`row-lock` ships as the default rather than `serializable`; the full argument, including the
-measurement that found it, is `docs/adr/0004-concurrency-control.md`.
-
-## Two connections, two roles
-
-`ledger_owner` owns the schema and is used only by the migration CLI.
-`ledger_app` is the runtime role: `SELECT` and `INSERT` on `entries` and `postings`, with
-`UPDATE`, `DELETE` and `TRUNCATE` revoked. The application never holds a connection capable
-of rewriting history. Keeping the two apart is what makes the revoke meaningful — a role
-that could migrate could also grant itself back what it lost.
+instead exhausts `DrizzleUnitOfWork`'s retries and reaches the client as a 500. Balance
+checkpoints also refuse to run under `serializable`, for a reason
+[ADR 0005](docs/adr/0005-balance-checkpoints.md) argues in full. That is why `row-lock` ships as
+the default; the measurement that decided it is in
+[ADR 0004](docs/adr/0004-concurrency-control.md).
