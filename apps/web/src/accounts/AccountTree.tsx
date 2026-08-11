@@ -34,9 +34,12 @@ export function AccountTree() {
     return new Map<string, Money>(entries);
   }, [trialBalance.data]);
 
-  const visible = (accounts.data ?? []).filter(
-    (account) => showClosed || account.closedAt === null,
-  );
+  // The tree is built from every account, closed or not, and the checkbox only controls what
+  // `TreeRows` renders. Filtering before `buildTree` would reparent an open child of a hidden
+  // closed account onto the root (the orphan rule in `tree.ts`) and drop the closed account's
+  // own balance from every ancestor's subtree total - so the hierarchy and the totals would
+  // depend on a checkbox that is supposed to be a display toggle, not a data toggle.
+  const tree = buildTree(accounts.data ?? []);
 
   return (
     <main className="mx-auto mt-8 w-[44rem]">
@@ -62,9 +65,7 @@ export function AccountTree() {
       </label>
 
       <ul className="mt-4 flex flex-col gap-1">
-        {buildTree(visible).map((node) => (
-          <TreeRow key={node.account.id} node={node} balancesById={balancesById} />
-        ))}
+        <TreeRows nodes={tree} balancesById={balancesById} showClosed={showClosed} />
       </ul>
 
       <section className="mt-10">
@@ -75,8 +76,46 @@ export function AccountTree() {
   );
 }
 
-function TreeRow({ node, balancesById }: { node: TreeNode; balancesById: ReadonlyMap<string, Money> }) {
+/**
+ * One row per node whose account is either open or shown, plus - unconditionally - every row
+ * beneath it. A closed account with the toggle off contributes no `<li>` of its own, but its
+ * children render exactly where they would if it were visible: hidden is a display decision
+ * about this one row, not about the subtree the row happens to sit above.
+ */
+function TreeRows({
+  nodes,
+  balancesById,
+  showClosed,
+}: {
+  nodes: readonly TreeNode[];
+  balancesById: ReadonlyMap<string, Money>;
+  showClosed: boolean;
+}) {
+  return (
+    <>
+      {nodes.map((node) =>
+        node.account.closedAt !== null && !showClosed ? (
+          <TreeRows key={node.account.id} nodes={node.children} balancesById={balancesById} showClosed={showClosed} />
+        ) : (
+          <TreeRow key={node.account.id} node={node} balancesById={balancesById} showClosed={showClosed} />
+        ),
+      )}
+    </>
+  );
+}
+
+function TreeRow({
+  node,
+  balancesById,
+  showClosed,
+}: {
+  node: TreeNode;
+  balancesById: ReadonlyMap<string, Money>;
+  showClosed: boolean;
+}) {
   const own = balancesById.get(node.account.id);
+  // Computed from `node.children` as built (every account, closed or not), never from what is
+  // currently rendered - the toggle must not be able to change a subtree total.
   const totals = node.children.length === 0 ? [] : subtreeTotals(node, balancesById);
 
   return (
@@ -99,9 +138,7 @@ function TreeRow({ node, balancesById }: { node: TreeNode; balancesById: Readonl
 
       {node.children.length === 0 ? null : (
         <ul className="pl-4">
-          {node.children.map((child) => (
-            <TreeRow key={child.account.id} node={child} balancesById={balancesById} />
-          ))}
+          <TreeRows nodes={node.children} balancesById={balancesById} showClosed={showClosed} />
         </ul>
       )}
     </li>
