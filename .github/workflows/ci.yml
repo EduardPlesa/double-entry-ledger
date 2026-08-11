@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+# One run per ref. A push that supersedes another cancels it rather than queueing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Split from `test` because these two fail in under a minute and should not wait behind a
+  # suite that starts containers.
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # The integration, concurrency and property suites start their own Postgres through
+      # Testcontainers, against the runner's Docker daemon, and pass their own configuration
+      # to `loadConfig` - they read none of this. These four are for the seed smoke check
+      # below, which uses the compose database the way a developer would. The two auth values
+      # are here because `config.ts` validates the whole environment at boot and refuses to
+      # start without them, not because the seed signs anything.
+      DATABASE_URL: postgres://ledger_app:ledger_app_dev@localhost:5433/ledger
+      DATABASE_MIGRATION_URL: postgres://ledger_owner:ledger_owner_dev@localhost:5433/ledger
+      AUTH_JWT_SECRET: ci-only-jwt-secret-not-for-anything-real
+      AUTH_REFRESH_TOKEN_PEPPER: ci-only-refresh-pepper-not-for-anything-real
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Covers the drift check on docs/openapi.json: the committed document is compared
+      # against what the running application would serve.
+      - run: pnpm test
+      - run: pnpm db:up
+      - run: pnpm db:migrate
+      # Small on purpose. This proves the script still runs against the current schema; the
+      # 500k numbers in docs/performance.md are taken by hand, because a timing threshold on a
+      # shared runner measures the runner.
+      - run: pnpm --filter @ledger/api perf:seed --postings 2000
