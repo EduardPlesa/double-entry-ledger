@@ -1,4 +1,5 @@
 import {
+  accountList,
   accountResource,
   balanceResource,
   createAccountInput,
@@ -177,7 +178,7 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       access: { kind: 'book', permission: 'book:read', bookFrom: 'param' },
       summary: 'List the accounts of a book',
       request: bookPath,
-      response: { status: 200, schema: z.array(accountResource) },
+      response: { status: 200, schema: accountList },
       handler: listAccounts,
     },
     {

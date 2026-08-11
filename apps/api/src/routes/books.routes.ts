@@ -1,4 +1,5 @@
 import {
+  bookList,
   bookResource,
   createBookInput,
   issuedApiKeyResource,
@@ -111,7 +112,7 @@ export function bookRoutes(dependencies: BookRouteDependencies): RouteDefinition
       path: '/books',
       access: { kind: 'authenticated' },
       summary: 'List the books this caller can reach',
-      response: { status: 200, schema: z.array(bookResource) },
+      response: { status: 200, schema: bookList },
       handler: listBooks,
     },
     {
