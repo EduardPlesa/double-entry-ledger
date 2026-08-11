@@ -2727,7 +2727,7 @@ git commit -m "test(web): one path through the proxy, the cookie and the boot re
 - `pnpm lint`, `pnpm typecheck` and `pnpm -r test` pass from the repository root.
 - All five screens the stage names exist and are reachable: the composer at `/books/:bookId/entries/new`, the tree at `/books/:bookId/accounts`, account detail at `/accounts/:accountId`, the trial balance at `/books/:bookId/trial-balance`, and the reversal at `/entries/:entryId/reverse`.
 - The composer states its imbalance per currency and refuses to submit until every currency is zero.
-- `grep -rn "Number(\|parseFloat\|parseInt\|toFixed" apps/web/src` finds nothing.
+- No amount is ever a JS `number`. `grep -rn "parseFloat\|parseInt\|toFixed" apps/web/src` finds nothing, and every `Number(` — if any — is converting something that is not money, such as a row index parsed out of a `legs.3.amount` error path. The rule is about amounts, not about the identifier `Number`.
 - Every API call goes through `apiFetch`; every query key comes from `keys`.
 - The Playwright path passes against a real API on a real Postgres.
 
