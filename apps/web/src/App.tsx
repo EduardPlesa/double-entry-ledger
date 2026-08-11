@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { ApiError } from './api/problem';
+import { AccountTree } from './accounts/AccountTree';
 import { Composer } from './entries/Composer';
 import { Books } from './routes/Books';
 import { Login } from './routes/Login';
@@ -47,6 +48,7 @@ export function App() {
               <Route path="/register" element={<Register />} />
               <Route element={<RequireSession />}>
                 <Route path="/books" element={<Books />} />
+                <Route path="/books/:bookId/accounts" element={<AccountTree />} />
                 <Route path="/books/:bookId/entries/new" element={<Composer />} />
               </Route>
               <Route path="*" element={<Navigate to="/books" replace />} />

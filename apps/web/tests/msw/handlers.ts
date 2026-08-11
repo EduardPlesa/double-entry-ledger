@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { AccountResource, BookResource } from '@ledger/shared';
+import type { AccountResource, BookResource, TrialBalanceResource } from '@ledger/shared';
 
 export const USER = { id: 'user-1', email: 'owner@example.com' };
 
@@ -34,6 +34,17 @@ export const ACCOUNTS: AccountResource[] = [
   },
 ];
 
+export const TRIAL_BALANCE: TrialBalanceResource = {
+  bookId: 'book-1',
+  asOf: null,
+  accounts: [
+    { accountId: 'acc-cash', name: 'Cash', type: 'asset', currency: 'EUR', balance: '10.00' },
+    { accountId: 'acc-sales', name: 'Sales', type: 'revenue', currency: 'EUR', balance: '-10.00' },
+  ],
+  totals: [{ currency: 'EUR', debits: '10.00', credits: '10.00', balanced: true }],
+  balanced: true,
+};
+
 function session() {
   return HttpResponse.json({
     accessToken: 'access-token',
@@ -57,4 +68,5 @@ export const handlers = [
   http.post('/auth/logout', () => new HttpResponse(null, { status: 204 })),
   http.get('/books', () => HttpResponse.json(BOOKS)),
   http.get('/books/:bookId/accounts', () => HttpResponse.json(ACCOUNTS)),
+  http.get('/books/:bookId/trial-balance', () => HttpResponse.json(TRIAL_BALANCE)),
 ];
