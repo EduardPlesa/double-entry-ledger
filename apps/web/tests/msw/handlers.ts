@@ -3,6 +3,7 @@ import type {
   AccountResource,
   BalanceResource,
   BookResource,
+  EntryResource,
   PostingPageResource,
   TrialBalanceResource,
 } from '@ledger/shared';
@@ -92,6 +93,21 @@ export const BALANCE: BalanceResource = {
   currency: 'EUR',
 };
 
+export const ENTRY: EntryResource = {
+  id: 'entry-1',
+  bookId: 'book-1',
+  occurredAt: '2026-03-01T12:00:00.000Z',
+  recordedAt: '2026-03-01T12:00:00.000Z',
+  description: 'a sale',
+  externalId: null,
+  reversalOf: null,
+  reversedBy: null,
+  postings: [
+    { id: '1', accountId: 'acc-cash', amount: '10.00', currency: 'EUR' },
+    { id: '2', accountId: 'acc-sales', amount: '-10.00', currency: 'EUR' },
+  ],
+};
+
 function session() {
   return HttpResponse.json({
     accessToken: 'access-token',
@@ -121,4 +137,5 @@ export const handlers = [
     return HttpResponse.json(cursor === null ? POSTINGS_PAGE_ONE : POSTINGS_PAGE_TWO);
   }),
   http.get('/accounts/:accountId/balance', () => HttpResponse.json(BALANCE)),
+  http.get('/entries/:entryId', () => HttpResponse.json(ENTRY)),
 ];
