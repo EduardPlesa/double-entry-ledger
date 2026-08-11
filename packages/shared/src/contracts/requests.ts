@@ -53,14 +53,14 @@ export type CreateBookInput = z.input<typeof createBookInput>;
  * The five account types of double-entry bookkeeping, matching the Postgres enum. Fixed by
  * accounting rather than by product requirements - there will never be a sixth.
  */
-const accountTypeSchema = z.enum(['asset', 'liability', 'equity', 'revenue', 'expense']);
+export const accountType = z.enum(['asset', 'liability', 'equity', 'revenue', 'expense']);
 
 /** The account-tree screen groups by this; exported so it can name the union, not five strings. */
-export type AccountType = z.infer<typeof accountTypeSchema>;
+export type AccountType = z.infer<typeof accountType>;
 
 export const createAccountInput = z.object({
   name: z.string().trim().min(1, 'must not be blank').max(200),
-  type: accountTypeSchema,
+  type: accountType,
   currency,
   parentId: z.uuid('must be a UUID').nullish(),
 });
