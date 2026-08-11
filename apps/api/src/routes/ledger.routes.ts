@@ -1,4 +1,15 @@
+import {
+  accountResource,
+  balanceResource,
+  createAccountInput,
+  entryResource,
+  postEntryInput,
+  postingPageResource,
+  reverseEntryInput,
+  trialBalanceResource,
+} from '@ledger/shared';
 import type { RequestHandler } from 'express';
+import { z } from 'zod';
 import { authorshipOf, bookAccessOf, principalOf } from '../http/context.js';
 import { recordIdempotentEntry } from '../middleware/idempotency.js';
 import {
@@ -27,6 +38,15 @@ export interface LedgerRouteDependencies {
 
 export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefinition[] {
   const { ledger } = dependencies;
+
+  /**
+   * `asOf` as a query object rather than the bare value the handlers used to parse.
+   *
+   * The rule is the same one `isoDateTimeQuery` always stated; what changed is that the spec
+   * lists parameters per key, and a schema for one value has no key to list. The handlers
+   * below parse through this, so the published parameter and the enforced one are one object.
+   */
+  const asOfQuery = z.object({ asOf: isoDateTimeQuery });
 
   const createAccount: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
@@ -72,7 +92,7 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
     const { bookId } = bookAccessOf(response);
     const accountId = uuidPathParam(request.params, 'accountId');
 
-    const asOf = parseOrThrow(isoDateTimeQuery, request.query.asOf, 'query');
+    const { asOf } = parseOrThrow(asOfQuery, request.query, 'query');
     const balance = await ledger.getBalance(
       bookId,
       accountId,
@@ -128,11 +148,18 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
   const trialBalance: RequestHandler = async (request, response) => {
     const { bookId } = bookAccessOf(response);
 
-    const asOf = parseOrThrow(isoDateTimeQuery, request.query.asOf, 'query');
+    const { asOf } = parseOrThrow(asOfQuery, request.query, 'query');
     const report = await ledger.trialBalance(bookId, asOf === undefined ? undefined : new Date(asOf));
 
     response.json(serializeTrialBalance(report));
   };
+
+  // The three path shapes, declared once each. The guard has already parsed the real value
+  // through `uuidPathParam` by the time any handler runs; these exist so the spec can list the
+  // parameter. `RouteDefinition` says why that is the one place a rule is written twice.
+  const bookPath = { params: z.object({ bookId: z.uuid() }) };
+  const accountPath = { params: z.object({ accountId: z.uuid() }) };
+  const entryPath = { params: z.object({ entryId: z.uuid() }) };
 
   return [
     {
@@ -140,6 +167,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/books/:bookId/accounts',
       access: { kind: 'book', permission: 'account:create', bookFrom: 'param' },
       summary: 'Create an account in a book',
+      request: { ...bookPath, body: createAccountInput },
+      response: { status: 201, schema: accountResource },
       handler: createAccount,
     },
     {
@@ -147,6 +176,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/books/:bookId/accounts',
       access: { kind: 'book', permission: 'book:read', bookFrom: 'param' },
       summary: 'List the accounts of a book',
+      request: bookPath,
+      response: { status: 200, schema: z.array(accountResource) },
       handler: listAccounts,
     },
     {
@@ -154,6 +185,16 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/books/:bookId/entries',
       access: { kind: 'book', permission: 'entry:post', bookFrom: 'param' },
       summary: 'Record a balanced entry',
+      request: { ...bookPath, body: postEntryInput },
+      response: { status: 201, schema: entryResource },
+      alsoAnswers: [
+        {
+          status: 200,
+          description:
+            'An entry with this `externalId` already existed in this book. The body is that ' +
+            'entry, unchanged - which is what makes retrying a timed-out post safe.',
+        },
+      ],
       handler: postEntry,
     },
     {
@@ -161,6 +202,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/accounts/:accountId/balance',
       access: { kind: 'book', permission: 'book:read', bookFrom: 'account' },
       summary: 'The balance of an account, optionally as of a point in time',
+      request: { ...accountPath, query: asOfQuery },
+      response: { status: 200, schema: balanceResource },
       handler: getBalance,
     },
     {
@@ -168,6 +211,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/accounts/:accountId/postings',
       access: { kind: 'book', permission: 'book:read', bookFrom: 'account' },
       summary: 'One page of an account’s postings, with a running balance',
+      request: { ...accountPath, query: paginationQuery },
+      response: { status: 200, schema: postingPageResource },
       handler: listPostings,
     },
     {
@@ -175,6 +220,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/entries/:entryId/reverse',
       access: { kind: 'book', permission: 'entry:reverse', bookFrom: 'entry' },
       summary: 'Reverse an entry by recording its negation',
+      request: { ...entryPath, body: reverseEntryInput },
+      response: { status: 201, schema: entryResource },
       handler: reverseEntry,
     },
     {
@@ -182,6 +229,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/entries/:entryId',
       access: { kind: 'book', permission: 'book:read', bookFrom: 'entry' },
       summary: 'Read one entry and the reversal that cancels it',
+      request: entryPath,
+      response: { status: 200, schema: entryResource },
       handler: getEntry,
     },
     {
@@ -189,6 +238,8 @@ export function ledgerRoutes(dependencies: LedgerRouteDependencies): RouteDefini
       path: '/books/:bookId/trial-balance',
       access: { kind: 'book', permission: 'book:read', bookFrom: 'param' },
       summary: 'Every account with its balance, and the proof the book adds up',
+      request: { ...bookPath, query: asOfQuery },
+      response: { status: 200, schema: trialBalanceResource },
       handler: trialBalance,
     },
   ];

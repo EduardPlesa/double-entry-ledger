@@ -1,3 +1,4 @@
+import { credentials, sessionResource } from '@ledger/shared';
 import type { Request, RequestHandler, Response } from 'express';
 import { UnauthenticatedError } from '../domain/errors.js';
 import { clearRefreshCookie, refreshCookieOf, setRefreshCookie } from '../http/cookies.js';
@@ -56,12 +57,18 @@ export function authRoutes(dependencies: AuthRouteDependencies): RouteDefinition
     response.status(204).end();
   };
 
+  // `credentials` is the schema `AuthService` parses with, referenced rather than copied. The
+  // service still does the parsing - it has to, since it is reachable without going through a
+  // route - and declaring the same value here means the spec cannot describe a body the
+  // service would reject.
   return [
     {
       method: 'post',
       path: '/auth/register',
       access: { kind: 'public' },
       summary: 'Create an account and start a session',
+      request: { body: credentials },
+      response: { status: 201, schema: sessionResource },
       handler: register,
     },
     {
@@ -69,6 +76,8 @@ export function authRoutes(dependencies: AuthRouteDependencies): RouteDefinition
       path: '/auth/login',
       access: { kind: 'public' },
       summary: 'Exchange credentials for a session',
+      request: { body: credentials },
+      response: { status: 200, schema: sessionResource },
       handler: login,
     },
     {
@@ -76,6 +85,9 @@ export function authRoutes(dependencies: AuthRouteDependencies): RouteDefinition
       path: '/auth/refresh',
       access: { kind: 'public' },
       summary: 'Rotate the refresh token and issue a new access token',
+      // No body. The credential is the refresh cookie, which is why this route is `public`
+      // and still returns a 401 to a caller who has none.
+      response: { status: 200, schema: sessionResource },
       handler: refresh,
     },
     {
@@ -83,6 +95,7 @@ export function authRoutes(dependencies: AuthRouteDependencies): RouteDefinition
       path: '/auth/logout',
       access: { kind: 'public' },
       summary: 'Revoke the session',
+      response: { status: 204 },
       handler: logout,
     },
   ];

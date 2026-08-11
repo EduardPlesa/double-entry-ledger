@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express';
+import { z } from 'zod';
 import type { AuthService } from '../services/auth.service.js';
 import type { BookService } from '../services/book.service.js';
 import type { LedgerService } from '../services/ledger.service.js';
@@ -45,6 +46,7 @@ function health(): RouteDefinition {
     path: '/health',
     access: { kind: 'public' },
     summary: 'Liveness probe',
+    response: { status: 200, schema: z.object({ status: z.literal('ok') }) },
     handler,
   };
 }
