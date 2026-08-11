@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { BookResource } from '@ledger/shared';
+import type { AccountResource, BookResource } from '@ledger/shared';
 
 export const USER = { id: 'user-1', email: 'owner@example.com' };
 
@@ -10,6 +10,27 @@ export const BOOKS: BookResource[] = [
     baseCurrency: 'EUR',
     createdAt: '2026-03-01T12:00:00.000Z',
     role: 'owner',
+  },
+];
+
+export const ACCOUNTS: AccountResource[] = [
+  {
+    id: 'acc-cash',
+    bookId: 'book-1',
+    name: 'Cash',
+    type: 'asset',
+    currency: 'EUR',
+    parentId: null,
+    closedAt: null,
+  },
+  {
+    id: 'acc-sales',
+    bookId: 'book-1',
+    name: 'Sales',
+    type: 'revenue',
+    currency: 'EUR',
+    parentId: null,
+    closedAt: null,
   },
 ];
 
@@ -35,4 +56,5 @@ export const handlers = [
   ),
   http.post('/auth/logout', () => new HttpResponse(null, { status: 204 })),
   http.get('/books', () => HttpResponse.json(BOOKS)),
+  http.get('/books/:bookId/accounts', () => HttpResponse.json(ACCOUNTS)),
 ];
