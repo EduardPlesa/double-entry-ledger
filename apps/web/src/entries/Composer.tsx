@@ -4,6 +4,7 @@ import { formatMoney, negateMoney, type AccountResource, type Money } from '@led
 import { useAccounts } from '../accounts/useAccounts';
 import {
   canSubmit,
+  currencyOf,
   imbalances,
   remainderColumn,
   remainderFor,
@@ -97,6 +98,7 @@ export function Composer() {
               key={index}
               row={row}
               accounts={accountsData ?? []}
+              currency={currencyOf(row, accountsById)}
               onChange={(patch) => { update(index, patch); }}
               onBalance={() => { balanceOnto(index); }}
               onRemove={rows.length > 2 ? () => { setRows((current) => current.filter((_, p) => p !== index)); } : null}
@@ -125,12 +127,14 @@ export function Composer() {
 function LegFields({
   row,
   accounts,
+  currency,
   onChange,
   onBalance,
   onRemove,
 }: {
   row: LegRow;
   accounts: readonly AccountResource[];
+  currency: string | null;
   onChange: (patch: Partial<LegRow>) => void;
   onBalance: () => void;
   onRemove: (() => void) | null;
@@ -146,17 +150,8 @@ function LegFields({
         >
           <option value="">Choose an account</option>
           {accounts.map((account) => (
-            // Currency lives on `title`, not in the visible label: an option's currency is the
-            // same fact the imbalance strip states per currency, and a form with two EUR
-            // accounts would otherwise print "EUR" once per option as well as once in the
-            // strip, which is noise rather than a second source of truth.
-            <option
-              key={account.id}
-              value={account.id}
-              title={account.currency}
-              disabled={account.closedAt !== null}
-            >
-              {account.name}
+            <option key={account.id} value={account.id} disabled={account.closedAt !== null}>
+              {account.name} ({account.currency})
             </option>
           ))}
         </select>
@@ -178,6 +173,7 @@ function LegFields({
         />
       </td>
       <td className="whitespace-nowrap text-sm">
+        <span className="mr-2 text-gray-500">{currency ?? ''}</span>
         <button type="button" onClick={onBalance} className="underline">
           Balance
         </button>
@@ -199,7 +195,7 @@ function ImbalanceStrip({ deltas }: { deltas: readonly { currency: string; delta
   if (deltas.length === 0) return null;
 
   return (
-    <ul className="mt-4 flex flex-col gap-1 text-sm">
+    <ul aria-label="Imbalance" className="mt-4 flex flex-col gap-1 text-sm">
       {deltas.map((entry) => (
         <li key={entry.currency}>
           <span className="font-semibold">{entry.currency}</span>{' '}

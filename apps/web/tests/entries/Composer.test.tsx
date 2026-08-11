@@ -23,6 +23,10 @@ function legRow(index: number) {
   return within(screen.getAllByRole('row')[index + 1]!);
 }
 
+function imbalanceStrip() {
+  return within(screen.getByRole('list', { name: /imbalance/i }));
+}
+
 async function fillLeg(index: number, accountId: string, column: 'debit' | 'credit', amount: string) {
   const user = userEvent.setup();
   const row = legRow(index);
@@ -37,8 +41,10 @@ describe('the composer', () => {
     await fillLeg(0, 'acc-cash', 'debit', '10.00');
     await fillLeg(1, 'acc-sales', 'credit', '5.80');
 
-    expect(await screen.findByText(/EUR/)).toBeInTheDocument();
-    expect(screen.getByText(/debits exceed credits by 4\.20/i)).toBeInTheDocument();
+    await screen.findByRole('list', { name: /imbalance/i });
+    const strip = imbalanceStrip();
+    expect(strip.getByText(/EUR/)).toBeInTheDocument();
+    expect(strip.getByText(/debits exceed credits by 4\.20/i)).toBeInTheDocument();
   });
 
   it('says balanced once the currency sums to zero', async () => {
@@ -47,7 +53,8 @@ describe('the composer', () => {
     await fillLeg(0, 'acc-cash', 'debit', '10.00');
     await fillLeg(1, 'acc-sales', 'credit', '10.00');
 
-    expect(await screen.findByText(/balanced/i)).toBeInTheDocument();
+    await screen.findByRole('list', { name: /imbalance/i });
+    expect(imbalanceStrip().getByText(/balanced/i)).toBeInTheDocument();
   });
 
   it('keeps submit disabled until every currency is zero', async () => {
@@ -126,8 +133,10 @@ describe('the composer', () => {
     await fillLeg(0, 'acc-cash', 'debit', '10.00');
     await fillLeg(1, 'acc-usd', 'credit', '3.00');
 
-    expect(await screen.findByText(/EUR/)).toBeInTheDocument();
-    expect(screen.getByText(/USD/)).toBeInTheDocument();
+    await screen.findByRole('list', { name: /imbalance/i });
+    const strip = imbalanceStrip();
+    expect(strip.getByText(/EUR/)).toBeInTheDocument();
+    expect(strip.getByText(/USD/)).toBeInTheDocument();
     expect(screen.queryByText(/7\.00/)).not.toBeInTheDocument();
   });
 });
