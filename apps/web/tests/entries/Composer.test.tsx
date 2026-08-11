@@ -1,8 +1,10 @@
+import { QueryClient } from '@tanstack/react-query';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { App } from '../../src/App';
+import { keys } from '../../src/api/keys';
 import { server } from '../msw/server';
 import { USER } from '../msw/handlers';
 
@@ -169,11 +171,38 @@ describe('posting an entry', () => {
     ]);
   });
 
-  it('carries an Idempotency-Key, and the same one on a retry', async () => {
-    const keysSeen: (string | null)[] = [];
+  it('invalidates the postings of every account the entry touched, not just the trial balance', async () => {
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     server.use(
-      http.post('/books/:bookId/entries', ({ request }) => {
+      http.post('/books/:bookId/entries', () => HttpResponse.json({ id: 'entry-1' }, { status: 201 })),
+    );
+
+    await openComposer();
+    await fillBalancedEntry();
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+    await screen.findByText(/recorded/i);
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(([filters]) => filters?.queryKey);
+
+    expect(invalidatedKeys).toContainEqual(keys.postings('acc-cash'));
+    expect(invalidatedKeys).toContainEqual(keys.postings('acc-sales'));
+    expect(invalidatedKeys).toContainEqual(keys.trialBalance('book-1', null));
+    expect(invalidatedKeys).toContainEqual(keys.accounts('book-1'));
+
+    invalidateSpy.mockRestore();
+  });
+
+  it('carries an Idempotency-Key, and a byte-identical body, on a retry', async () => {
+    // A held key is only a correct retry while the request underneath it is unchanged - the API
+    // fingerprints the raw body and compares it before it decides whether to replay, so a key
+    // that is "the same" while the body drifts (e.g. a fresh `occurredAt` per attempt) is a
+    // real client bug that a header-only assertion would never catch. This asserts both.
+    const keysSeen: (string | null)[] = [];
+    const bodiesSeen: string[] = [];
+    server.use(
+      http.post('/books/:bookId/entries', async ({ request }) => {
         keysSeen.push(request.headers.get('idempotency-key'));
+        bodiesSeen.push(await request.text());
         return keysSeen.length === 1
           ? HttpResponse.json(
               { status: 503, code: 'INTERNAL_ERROR', detail: 'try again', requestId: 'req-1' },
@@ -195,18 +224,52 @@ describe('posting an entry', () => {
     expect(keysSeen).toHaveLength(2);
     expect(keysSeen[0]).toBe(keysSeen[1]);
     expect(keysSeen[0]).not.toBeNull();
+    expect(bodiesSeen[0]).toBe(bodiesSeen[1]);
   });
 
-  it('says an entry already existed when the API answers 200 rather than 201', async () => {
+  it('mints a new key when a leg is edited after a failed attempt', async () => {
+    // "Held across retries" is only correct while the request is the same request. Once the
+    // user has acted on a failure - here, changed the amounts - the next post is a different
+    // request, and reusing the old key would either replay the stale refusal or hit the
+    // server's IDEMPOTENCY_KEY_REUSED fingerprint check.
+    const keysSeen: (string | null)[] = [];
     server.use(
-      http.post('/books/:bookId/entries', () => HttpResponse.json({ id: 'entry-1' }, { status: 200 })),
+      http.post('/books/:bookId/entries', ({ request }) => {
+        keysSeen.push(request.headers.get('idempotency-key'));
+        return keysSeen.length === 1
+          ? HttpResponse.json(
+              {
+                status: 422,
+                code: 'ACCOUNT_OVERDRAWN',
+                detail: 'account acc-cash would be overdrawn',
+                requestId: 'req-1',
+                accountId: 'acc-cash',
+                shortfall: { currency: 'EUR', amount: '5.00' },
+              },
+              { status: 422, headers: { 'content-type': 'application/problem+json' } },
+            )
+          : HttpResponse.json({ id: 'entry-1' }, { status: 201 });
+      }),
     );
 
     await openComposer();
     await fillBalancedEntry();
     await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+    await screen.findByText(/would be overdrawn/i);
 
-    expect(await screen.findByText(/already recorded/i)).toBeInTheDocument();
+    // Still balanced afterwards, so the button re-enables - but it is a different request.
+    await userEvent.clear(legRow(0).getByLabelText(/debit/i));
+    await userEvent.type(legRow(0).getByLabelText(/debit/i), '20.00');
+    await userEvent.clear(legRow(1).getByLabelText(/credit/i));
+    await userEvent.type(legRow(1).getByLabelText(/credit/i), '20.00');
+
+    await userEvent.click(screen.getByRole('button', { name: /post entry/i }));
+    await screen.findByText(/recorded/i);
+
+    expect(keysSeen).toHaveLength(2);
+    expect(keysSeen[0]).not.toBe(keysSeen[1]);
+    expect(keysSeen[0]).not.toBeNull();
+    expect(keysSeen[1]).not.toBeNull();
   });
 
   it('puts a rejected leg on its own row rather than in a toast', async () => {
