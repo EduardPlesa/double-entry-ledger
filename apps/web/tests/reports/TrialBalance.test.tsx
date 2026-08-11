@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { App } from '../../src/App';
@@ -14,6 +14,13 @@ async function openReport(search = '') {
   return screen.findByRole('heading', { name: /trial balance/i });
 }
 
+// Scoped the same way the composer's tests scope the imbalance strip: `TrialBalance.tsx` and
+// `AccountTree.tsx` both render a balance and its currency as two elements now, so `EUR` alone
+// is no longer unique to one table on this screen, and a query has to say which table it means.
+function totalsTable() {
+  return within(screen.getByRole('table', { name: /totals/i }));
+}
+
 describe('the trial balance', () => {
   it('groups accounts under a heading per type, in the order the server sent them', async () => {
     await openReport();
@@ -25,9 +32,11 @@ describe('the trial balance', () => {
 
   it('shows debits and credits per currency', async () => {
     await openReport();
+    await screen.findByText('Cash');
 
-    expect(await screen.findByText('EUR')).toBeInTheDocument();
-    expect(screen.getAllByText('10.00').length).toBeGreaterThan(0);
+    const totals = totalsTable();
+    expect(totals.getByText('EUR')).toBeInTheDocument();
+    expect(totals.getAllByText('10.00').length).toBeGreaterThan(0);
   });
 
   it('passes asOf from the query string to the API', async () => {
