@@ -1,4 +1,5 @@
 import {
+  absMoney,
   formatMoney,
   isZeroMoney,
   negateMoney,
@@ -125,7 +126,7 @@ export function remainderFor(
 
   if (delta === undefined || isZeroMoney(delta.delta)) return null;
 
-  return formatMoney(absolute(delta.delta));
+  return formatMoney(absMoney(delta.delta));
 }
 
 /** Which column `remainderFor`'s value belongs in: a positive outstanding delta needs a credit. */
@@ -150,10 +151,6 @@ export function remainderColumn(
 
 export function currencyOf(row: LegRow, accountsById: AccountsById): string | null {
   return accountsById.get(row.accountId)?.currency ?? null;
-}
-
-function absolute(value: Money): Money {
-  return value.amountMinor < 0n ? negateMoney(value) : value;
 }
 
 /** `parseMoney` throws on anything it does not like; here that is an answer, not a failure. */

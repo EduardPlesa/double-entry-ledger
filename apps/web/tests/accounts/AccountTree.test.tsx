@@ -63,4 +63,48 @@ describe('the account tree', () => {
 
     expect(await screen.findByRole('link', { name: 'Cash' })).toHaveAttribute('href', '/accounts/acc-cash');
   });
+
+  it('keeps a subtree total the same whether the toggle hides closed accounts or not', async () => {
+    // Filtering before the tree is built would reparent Petty cash onto the root and drop
+    // Old cash's balance from the subtree total - so the toggle would change a number that is
+    // supposed to be a display decision. This proves it does not.
+    server.use(
+      http.get('/books/:bookId/accounts', () =>
+        HttpResponse.json([
+          { id: 'acc-cash', bookId: 'book-1', name: 'Cash', type: 'asset', currency: 'EUR', parentId: null, closedAt: null },
+          {
+            id: 'acc-old-cash',
+            bookId: 'book-1',
+            name: 'Old cash',
+            type: 'asset',
+            currency: 'EUR',
+            parentId: 'acc-cash',
+            closedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ]),
+      ),
+      http.get('/books/:bookId/trial-balance', () =>
+        HttpResponse.json({
+          bookId: 'book-1',
+          asOf: null,
+          accounts: [
+            { accountId: 'acc-cash', name: 'Cash', type: 'asset', currency: 'EUR', balance: '10.00' },
+            { accountId: 'acc-old-cash', name: 'Old cash', type: 'asset', currency: 'EUR', balance: '5.00' },
+          ],
+          totals: [{ currency: 'EUR', debits: '15.00', credits: '0.00', balanced: false }],
+          balanced: false,
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    await openTree();
+
+    expect(await screen.findByText(/including children: 15\.00 EUR/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', { name: /show closed/i }));
+
+    expect(screen.queryByText('Old cash')).not.toBeInTheDocument();
+    expect(screen.getByText(/including children: 15\.00 EUR/i)).toBeInTheDocument();
+  });
 });

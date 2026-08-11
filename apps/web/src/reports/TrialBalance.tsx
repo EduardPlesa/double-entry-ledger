@@ -55,14 +55,14 @@ export function TrialBalance() {
                 {line.name}
               </td>
               <td className="text-right text-gray-500">
-                {line.balance} {line.currency}
+                <span>{line.balance}</span> <span>{line.currency}</span>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
 
-      <table className="mt-6 w-full text-sm">
+      <table aria-label="Totals" className="mt-6 w-full text-sm">
         <thead>
           <tr>
             <th className="text-left">Currency</th>
