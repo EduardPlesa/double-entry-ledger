@@ -110,6 +110,11 @@ export function Reversal() {
 
   const impact = impactOf(entry.data, balancesById);
   const negative = impact.filter((line) => isNegativeMoney(line.after));
+  const alreadyReversed = entry.data.reversedBy !== null;
+  // The reversal is no longer on offer once it has been posted (this session) or found to have
+  // been posted already (an earlier session): the warning describes what posting *would* do,
+  // and there is no "would" left in either terminal state - only what already happened.
+  const stillOffered = !done && !alreadyReversed;
 
   return (
     <main className="mx-auto mt-8 w-[44rem]">
@@ -137,7 +142,7 @@ export function Reversal() {
         </tbody>
       </table>
 
-      {negative.length === 0 ? null : (
+      {!stillOffered || negative.length === 0 ? null : (
         <p className="mt-4 border border-amber-400 p-3 text-sm">
           {negative.map((line) => nameFor(line.accountId)).join(', ')} would go negative. If{' '}
           {negative.length === 1 ? 'that account is' : 'any of those accounts is'} guarded, the
@@ -146,10 +151,17 @@ export function Reversal() {
         </p>
       )}
 
-      {entry.data.reversedBy !== null ? (
-        <p className="mt-4 text-sm">This entry is already reversed.</p>
-      ) : done ? (
+      {/*
+       * `done` is checked first even though `reversedBy` is also true by this point: the
+       * success handler invalidates `keys.entry`, so the refetch lands before this render and
+       * `reversedBy` flips true the moment the reversal is posted - "just reversed, by me, this
+       * session" and "already reversed, before this screen ever loaded" both read as
+       * `reversedBy !== null`. `done` is what tells them apart.
+       */}
+      {done ? (
         <p className="mt-4 text-sm">Entry reversed.</p>
+      ) : alreadyReversed ? (
+        <p className="mt-4 text-sm">This entry is already reversed.</p>
       ) : (
         <button
           type="button"

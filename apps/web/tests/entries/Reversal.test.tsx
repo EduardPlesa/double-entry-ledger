@@ -133,6 +133,45 @@ describe('the reversal flow', () => {
     expect(screen.getByText('req-rev')).toBeInTheDocument();
   });
 
+  it('reads "Entry reversed." rather than "already reversed" once the post-reversal refetch lands', async () => {
+    // Mirrors the real API: the entry is fetched once on load (`reversedBy: null`, so the
+    // button renders at all) and again by the success handler's invalidation, which - because
+    // the reversal actually landed - now carries `reversedBy` set. A GET that always returned
+    // `reversedBy: null` would never exercise the branch this test exists to pin: the refetched
+    // entry satisfies `reversedBy !== null` at the exact moment `done` also becomes true, and
+    // `done` must be the one that wins.
+    // Cash's balance is set below what the reversal's -10.00 leg can absorb without going
+    // negative, so the warning is live going in - proving its disappearance below is the
+    // post-reversal render suppressing it, not the warning never having had a reason to show.
+    let entryCalls = 0;
+    server.use(
+      http.get('/books/:bookId/trial-balance', () =>
+        HttpResponse.json({
+          bookId: 'book-1',
+          asOf: null,
+          accounts: [{ accountId: 'acc-cash', name: 'Cash', type: 'asset', currency: 'EUR', balance: '5.00' }],
+          totals: [{ currency: 'EUR', debits: '5.00', credits: '5.00', balanced: true }],
+          balanced: true,
+        }),
+      ),
+      http.get('/entries/:entryId', () => {
+        entryCalls += 1;
+        return HttpResponse.json(entryCalls === 1 ? ENTRY : { ...ENTRY, reversedBy: 'entry-2' });
+      }),
+      http.post('/entries/:entryId/reverse', () => HttpResponse.json({ id: 'entry-2' }, { status: 201 })),
+    );
+
+    await openReversal();
+    expect(await screen.findByText(/would go negative/i)).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole('button', { name: /reverse this entry/i }));
+
+    expect(await screen.findByText('Entry reversed.')).toBeInTheDocument();
+    expect(screen.queryByText(/already reversed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/may refuse/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/would go negative/i)).not.toBeInTheDocument();
+  });
+
   it('invalidates the entry, the accounts, the trial balance, and the postings of every affected account', async () => {
     // A stale `keys.entry` is exactly what `reversedBy` was added to prevent - returning to this
     // screen must see the reversal, not re-offer a button whose only outcome is
