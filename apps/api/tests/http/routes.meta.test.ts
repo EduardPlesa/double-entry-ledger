@@ -85,6 +85,10 @@ describe('every route declares an access requirement', () => {
       .sort();
 
     expect(publicPaths).toEqual([
+      // The spec and the page that renders it. Public because a specification behind a
+      // credential is one nobody reads, and it describes shapes rather than data.
+      'get /docs',
+      'get /docs/openapi.json',
       'get /health',
       'post /auth/login',
       'post /auth/logout',
