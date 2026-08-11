@@ -192,6 +192,18 @@ describe('apiFetch', () => {
       .map((call) => headersOf(call).get('authorization'));
     expect(replayHeaders).toEqual(['Bearer token-2', 'Bearer token-2']);
   });
+  it('reports the status of a successful response, so 200 and 201 can be told apart', async () => {
+    const seen: number[] = [];
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ id: 'entry-1' }, 201))
+      .mockResolvedValueOnce(json({ id: 'entry-1' }, 200));
+
+    const onStatus = (status: number) => seen.push(status);
+    await apiFetch('/books/1/entries', { method: 'POST', body: {}, onStatus });
+    await apiFetch('/books/1/entries', { method: 'POST', body: {}, onStatus });
+
+    expect(seen).toEqual([201, 200]);
+  });
 });
 
 describe('newIdempotencyKey', () => {

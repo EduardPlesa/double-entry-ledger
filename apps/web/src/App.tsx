@@ -2,6 +2,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { ApiError } from './api/problem';
+import { AccountDetail } from './accounts/AccountDetail';
+import { AccountTree } from './accounts/AccountTree';
+import { Composer } from './entries/Composer';
+import { Reversal } from './entries/Reversal';
+import { TrialBalance } from './reports/TrialBalance';
 import { Books } from './routes/Books';
 import { Login } from './routes/Login';
 import { Register } from './routes/Register';
@@ -46,6 +51,11 @@ export function App() {
               <Route path="/register" element={<Register />} />
               <Route element={<RequireSession />}>
                 <Route path="/books" element={<Books />} />
+                <Route path="/books/:bookId/accounts" element={<AccountTree />} />
+                <Route path="/books/:bookId/trial-balance" element={<TrialBalance />} />
+                <Route path="/books/:bookId/entries/new" element={<Composer />} />
+                <Route path="/accounts/:accountId" element={<AccountDetail />} />
+                <Route path="/entries/:entryId/reverse" element={<Reversal />} />
               </Route>
               <Route path="*" element={<Navigate to="/books" replace />} />
             </Routes>
