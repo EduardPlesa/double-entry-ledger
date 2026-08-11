@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildOpenApiDocument } from '../../src/openapi/document.js';
 import { acceptsIdempotencyKey } from '../../src/routes/registry.js';
@@ -103,5 +106,33 @@ describe('the generated document', () => {
     expect(entry?.content?.['application/json']?.schema).toEqual({
       $ref: '#/components/schemas/Entry',
     });
+  });
+});
+
+/** The committed copy, which is what a reader who never starts the server gets. */
+const SPEC_PATH = fileURLToPath(new URL('../../../../docs/openapi.json', import.meta.url));
+
+describe('GET /docs', () => {
+  it('serves the document without a credential', async () => {
+    const response = await request(application.app).get('/docs/openapi.json');
+
+    expect(response.status).toBe(200);
+    expect(response.body.openapi).toBe('3.1.0');
+  });
+
+  it('serves a page without a credential', async () => {
+    const response = await request(application.app).get('/docs');
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('matches the committed spec', async () => {
+    const committed: unknown = JSON.parse(await readFile(SPEC_PATH, 'utf8'));
+
+    expect(
+      JSON.parse(JSON.stringify(buildOpenApiDocument(definitions()))),
+      'docs/openapi.json is out of date: run `pnpm --filter @ledger/api openapi`',
+    ).toEqual(committed);
   });
 });
