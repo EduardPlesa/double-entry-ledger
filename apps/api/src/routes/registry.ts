@@ -82,6 +82,15 @@ export interface RouteDefinition {
    * would be describing something the route does not always do.
    */
   readonly alsoAnswers?: readonly { readonly status: number; readonly description: string }[];
+  /**
+   * A credential the handler reads for itself, rather than one a guard checks.
+   *
+   * `POST /auth/refresh` is the only route with one. It is `public` because the guard chain
+   * has nothing to verify - and that is a true statement about the middleware and a false one
+   * about the endpoint, which cannot work without the refresh cookie. Declared here so the
+   * spec can require it, rather than published as an endpoint that needs no credential at all.
+   */
+  readonly credential?: 'refreshCookie';
   readonly handler: RequestHandler;
 }
 

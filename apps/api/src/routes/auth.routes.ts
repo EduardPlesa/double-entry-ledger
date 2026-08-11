@@ -87,6 +87,7 @@ export function authRoutes(dependencies: AuthRouteDependencies): RouteDefinition
       summary: 'Rotate the refresh token and issue a new access token',
       // No body. The credential is the refresh cookie, which is why this route is `public`
       // and still returns a 401 to a caller who has none.
+      credential: 'refreshCookie',
       response: { status: 200, schema: sessionResource },
       handler: refresh,
     },

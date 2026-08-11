@@ -56,6 +56,13 @@ export const bookResource = z.object({
 export type BookResource = z.infer<typeof bookResource>;
 
 /**
+ * The list forms are named rather than written as `z.array(...)` at each use, because the
+ * generator publishes a component per named schema and an anonymous array would be inlined
+ * into every operation that returns one.
+ */
+export const bookList = z.array(bookResource);
+
+/**
  * A membership after it was granted or changed.
  *
  * The email is echoed back because the request named the member by address and the response
@@ -118,6 +125,8 @@ export const accountResource = z.object({
 });
 
 export type AccountResource = z.infer<typeof accountResource>;
+
+export const accountList = z.array(accountResource);
 
 export const entryResource = z.object({
   id: z.uuid(),
