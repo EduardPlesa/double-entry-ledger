@@ -37,7 +37,7 @@ authorises are two statements with a window between them, and no amount of care 
 service closes that window.
 
 This is committed as evidence rather than described. Branch **`evidence/overdraft-race`**,
-commit **`3bb3d7c`** — pushed, never merged, permanently red by design. It carries the same
+commit **`eb67ffa`** — pushed, never merged, permanently red by design. It carries the same
 `tests/concurrency/overdraft.race.test.ts` against the naive implementation, asserting that
 the negative balance does *not* appear; the diff between that branch and this one is the
 story.
