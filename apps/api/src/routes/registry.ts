@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express';
+import type { z } from 'zod';
 import type { Permission } from '../domain/policy.js';
 
 /**
@@ -45,8 +46,51 @@ export interface RouteDefinition {
   readonly method: RouteMethod;
   readonly path: string;
   readonly access: RouteAccess;
-  /** One line, for the audit output and eventually for the OpenAPI summary in stage 7. */
+  /** One line, for the audit output and for the OpenAPI summary. */
   readonly summary: string;
+  /**
+   * What the request has to look like, and what the row's own handler parses it with.
+   *
+   * These are the schemas the enforcement uses, not a description of them written beside it.
+   * A query schema is read out of the definition by the handler; a body schema is the same
+   * value the service parses, imported once and referenced here. So a shape that appears in
+   * the published spec but is enforced nowhere is not a thing this table can express - which
+   * is the entire reason the fields are here rather than in the generator.
+   *
+   * `params` is the exception, and the only one: the authorize guard resolves the book from
+   * the path before the handler runs, and it does that through `uuidPathParam`. The schema
+   * here declares the same parameter for the spec to list, but it is a second expression of
+   * one rule. Changing one without the other is possible, and `openapi.test.ts` will not
+   * catch it.
+   */
+  readonly request?: {
+    readonly params?: z.ZodType;
+    readonly query?: z.ZodType;
+    readonly body?: z.ZodType;
+  };
+  /**
+   * The 2xx body. The status it is returned with.
+   *
+   * `schema` is absent where there is no body - a 204 is a status and nothing else.
+   */
+  readonly response?: { readonly status: number; readonly schema?: z.ZodType };
+  /**
+   * Other statuses this route answers with on success, carrying the same body.
+   *
+   * One route needs it: posting an entry whose `externalId` was used before returns the entry
+   * that already exists, with a 200 rather than a 201. A spec that documented only the 201
+   * would be describing something the route does not always do.
+   */
+  readonly alsoAnswers?: readonly { readonly status: number; readonly description: string }[];
+  /**
+   * A credential the handler reads for itself, rather than one a guard checks.
+   *
+   * `POST /auth/refresh` is the only route with one. It is `public` because the guard chain
+   * has nothing to verify - and that is a true statement about the middleware and a false one
+   * about the endpoint, which cannot work without the refresh cookie. Declared here so the
+   * spec can require it, rather than published as an endpoint that needs no credential at all.
+   */
+  readonly credential?: 'refreshCookie';
   readonly handler: RequestHandler;
 }
 
