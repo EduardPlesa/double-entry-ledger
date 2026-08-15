@@ -80,6 +80,23 @@ add a second person to a book is to call `POST /books/{bookId}/members` directly
 **What closing it takes.** Two forms and the `member:manage` checks around them. The contracts
 already exist and are published in the spec.
 
+## An account cannot be fetched by id, so its own page cannot name it
+
+There is no `GET /accounts/{accountId}`. The two account routes are
+`/accounts/{accountId}/balance` and `/accounts/{accountId}/postings`, and neither returns the
+account's name, type or currency — only its balance and its postings. `apps/web`'s account
+screen is reached by id from the tree, holds nothing but that id, and so heads itself with the
+word `Account` rather than `Bank`.
+
+**What it costs.** The one screen a user lands on after clicking an account never says which
+account they are looking at, and a deep link or a refresh leaves no way to find out without
+going back to the tree.
+
+**What closing it takes.** One route on the registry returning `accountResource`, which already
+exists as a published schema. The authorization is the same `book:read` with `bookFrom:
+'account'` the other two account routes already use, so there is no new access question — this
+is a missing endpoint, not a missing design.
+
 ## The frontend's tests never meet the real API
 
 Every test in `apps/web` runs against MSW handlers. They assert that the client sends what the
