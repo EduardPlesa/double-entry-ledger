@@ -1,9 +1,11 @@
 import type { RequestHandler } from 'express';
+import { z } from 'zod';
 import type { AuthService } from '../services/auth.service.js';
 import type { BookService } from '../services/book.service.js';
 import type { LedgerService } from '../services/ledger.service.js';
 import { authRoutes } from './auth.routes.js';
 import { bookRoutes } from './books.routes.js';
+import { docsRoutes } from './docs.routes.js';
 import { ledgerRoutes } from './ledger.routes.js';
 import type { RouteDefinition } from './registry.js';
 
@@ -21,12 +23,19 @@ export interface RouteDependencies {
 }
 
 export function allRoutes(dependencies: RouteDependencies): RouteDefinition[] {
-  return [
+  const served = [
     health(),
     ...authRoutes({ auth: dependencies.auth }),
     ...bookRoutes({ books: dependencies.books }),
     ...ledgerRoutes({ ledger: dependencies.ledger }),
   ];
+
+  // The docs routes describe the whole list, themselves included, so they are handed a
+  // function rather than the array they are about to become part of. It is called on the
+  // first request to `/docs/openapi.json` and not before.
+  const docs = docsRoutes({ definitions: () => [...served, ...docs] });
+
+  return [...served, ...docs];
 }
 
 /**
@@ -45,6 +54,7 @@ function health(): RouteDefinition {
     path: '/health',
     access: { kind: 'public' },
     summary: 'Liveness probe',
+    response: { status: 200, schema: z.object({ status: z.literal('ok') }) },
     handler,
   };
 }

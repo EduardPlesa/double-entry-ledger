@@ -1,0 +1,2231 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ledger API",
+    "version": "0.1.0",
+    "description": "A double-entry ledger. Amounts are decimal strings, never JSON numbers; posting ids are strings because a bigserial outruns `Number.MAX_SAFE_INTEGER`; timestamps are ISO 8601 with an offset. Balances are derived from postings and are never stored."
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Liveness probe",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Liveness probe",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "ok"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "operationId": "postAuthRegister",
+        "summary": "Create an account and start a session",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Create an account and start a session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "operationId": "postAuthLogin",
+        "summary": "Exchange credentials for a session",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exchange credentials for a session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "operationId": "postAuthRefresh",
+        "summary": "Rotate the refresh token and issue a new access token",
+        "security": [
+          {
+            "refreshCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rotate the refresh token and issue a new access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "postAuthLogout",
+        "summary": "Revoke the session",
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "Revoke the session"
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books": {
+      "post": {
+        "operationId": "postBooks",
+        "summary": "Create a book, owned by the caller",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBookInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Create a book, owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Book"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getBooks",
+        "summary": "List the books this caller can reach",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List the books this caller can reach",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books/{bookId}/members": {
+      "post": {
+        "operationId": "postBooksBookIdMembers",
+        "summary": "Grant or change a member’s role",
+        "description": "Requires `member:manage` in the book named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. A retry presenting the same key returns the first response rather than repeating the write. Reusing a key for a different request is a 422; retrying while the first is still in flight is a 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantRoleInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Grant or change a member’s role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Membership"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with this `Idempotency-Key` is still in flight.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books/{bookId}/api-keys": {
+      "post": {
+        "operationId": "postBooksBookIdApikeys",
+        "summary": "Issue an API key scoped to this book",
+        "description": "Requires `member:manage` in the book named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. A retry presenting the same key returns the first response rather than repeating the write. Reusing a key for a different request is a 422; retrying while the first is still in flight is a 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueApiKeyInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Issue an API key scoped to this book",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with this `Idempotency-Key` is still in flight.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books/{bookId}/accounts": {
+      "post": {
+        "operationId": "postBooksBookIdAccounts",
+        "summary": "Create an account in a book",
+        "description": "Requires `account:create` in the book named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. A retry presenting the same key returns the first response rather than repeating the write. Reusing a key for a different request is a 422; retrying while the first is still in flight is a 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAccountInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Create an account in a book",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with this `Idempotency-Key` is still in flight.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getBooksBookIdAccounts",
+        "summary": "List the accounts of a book",
+        "description": "Requires `book:read` in the book named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List the accounts of a book",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books/{bookId}/entries": {
+      "post": {
+        "operationId": "postBooksBookIdEntries",
+        "summary": "Record a balanced entry",
+        "description": "Requires `entry:post` in the book named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. A retry presenting the same key returns the first response rather than repeating the write. Reusing a key for a different request is a 422; retrying while the first is still in flight is a 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostEntryInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An entry with this `externalId` already existed in this book. The body is that entry, unchanged - which is what makes retrying a timed-out post safe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Record a balanced entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with this `Idempotency-Key` is still in flight.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/{accountId}/balance": {
+      "get": {
+        "operationId": "getAccountsAccountIdBalance",
+        "summary": "The balance of an account, optionally as of a point in time",
+        "description": "Requires `book:read` in the book that owns the account named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "asOf",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The balance of an account, optionally as of a point in time",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Balance"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/{accountId}/postings": {
+      "get": {
+        "operationId": "getAccountsAccountIdPostings",
+        "summary": "One page of an account’s postings, with a running balance",
+        "description": "Requires `book:read` in the book that owns the account named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of an account’s postings, with a running balance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostingPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/entries/{entryId}/reverse": {
+      "post": {
+        "operationId": "postEntriesEntryIdReverse",
+        "summary": "Reverse an entry by recording its negation",
+        "description": "Requires `entry:reverse` in the book that owns the entry named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. A retry presenting the same key returns the first response rather than repeating the write. Reusing a key for a different request is a 422; retrying while the first is still in flight is a 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReverseEntryInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Reverse an entry by recording its negation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A request with this `Idempotency-Key` is still in flight.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed, and describes something that cannot be done: an unbalanced entry, a closed account, an overdrawn one, a currency that does not match.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/entries/{entryId}": {
+      "get": {
+        "operationId": "getEntriesEntryId",
+        "summary": "Read one entry and the reversal that cancels it",
+        "description": "Requires `book:read` in the book that owns the entry named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read one entry and the reversal that cancels it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books/{bookId}/trial-balance": {
+      "get": {
+        "operationId": "getBooksBookIdTrialbalance",
+        "summary": "Every account with its balance, and the proof the book adds up",
+        "description": "Requires `book:read` in the book named in the path.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bookId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "asOf",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every account with its balance, and the proof the book adds up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrialBalance"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not parse as the shape this route declares.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential was presented, or the one presented did not verify.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A member of this book whose role does not carry the permission above.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such book, account or entry - or one the caller is not a member of. The two are deliberately the same answer: a 403 would confirm the resource exists to anyone holding an id.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/docs/openapi.json": {
+      "get": {
+        "operationId": "getDocsOpenapi.json",
+        "summary": "The OpenAPI document for this API",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document for this API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "openapi": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "openapi"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "operationId": "getDocs",
+        "summary": "An HTML page rendering the OpenAPI document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "An HTML page rendering the OpenAPI document"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Credentials": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320,
+            "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "CreateBookInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "baseCurrency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          }
+        },
+        "required": [
+          "name",
+          "baseCurrency"
+        ]
+      },
+      "CreateAccountInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "asset",
+              "liability",
+              "equity",
+              "revenue",
+              "expense"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "parentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "currency"
+        ]
+      },
+      "PostEntryInput": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "externalId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "legs": {
+            "minItems": 2,
+            "maxItems": 1000,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "amount": {
+                  "type": "string"
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$"
+                }
+              },
+              "required": [
+                "accountId",
+                "amount",
+                "currency"
+              ]
+            }
+          }
+        },
+        "required": [
+          "occurredAt",
+          "description",
+          "legs"
+        ]
+      },
+      "ReverseEntryInput": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "externalId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "GrantRoleInput": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "accountant",
+              "viewer"
+            ]
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ]
+      },
+      "IssueApiKeyInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "accountant",
+              "viewer"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "role"
+        ]
+      },
+      "Book": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "baseCurrency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "description": "An ISO 4217 code, such as EUR."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "accountant",
+              "viewer"
+            ],
+            "description": "The caller's role in this book. Present so the UI can stop offering what the policy forbids - a viewer should not be shown a compose button that always ends in a 403. The server still decides; this only lets the client stop asking."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "baseCurrency",
+          "createdAt",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "BookList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Book"
+        }
+      },
+      "Account": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "bookId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "asset",
+              "liability",
+              "equity",
+              "revenue",
+              "expense"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "description": "An ISO 4217 code, such as EUR."
+          },
+          "parentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null for a root account. The tree the frontend draws is built from this column."
+          },
+          "closedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "bookId",
+          "name",
+          "type",
+          "currency",
+          "parentId",
+          "closedAt"
+        ],
+        "additionalProperties": false
+      },
+      "AccountList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Account"
+        }
+      },
+      "Entry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "bookId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "description": {
+            "type": "string"
+          },
+          "externalId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reversalOf": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reversedBy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reversal of this entry, where one exists. The inverse of `reversalOf`, and the only way a caller can know an entry is already reversed without attempting the reversal and reading `ENTRY_ALREADY_REVERSED` off the failure."
+          },
+          "postings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^\\d+$"
+                },
+                "accountId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "amount": {
+                  "type": "string",
+                  "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+                  "description": "A decimal string. Never a JSON number: a JSON number is an IEEE 754 double."
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$",
+                  "description": "An ISO 4217 code, such as EUR."
+                }
+              },
+              "required": [
+                "id",
+                "accountId",
+                "amount",
+                "currency"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "bookId",
+          "occurredAt",
+          "recordedAt",
+          "description",
+          "externalId",
+          "reversalOf",
+          "reversedBy",
+          "postings"
+        ],
+        "additionalProperties": false
+      },
+      "Balance": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "asOf": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The instant asked for, or null for the balance as of now."
+          },
+          "balance": {
+            "type": "string",
+            "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+            "description": "A decimal string. Never a JSON number: a JSON number is an IEEE 754 double."
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "description": "An ISO 4217 code, such as EUR."
+          }
+        },
+        "required": [
+          "accountId",
+          "asOf",
+          "balance",
+          "currency"
+        ],
+        "additionalProperties": false
+      },
+      "TrialBalance": {
+        "type": "object",
+        "properties": {
+          "bookId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "asOf": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "asset",
+                    "liability",
+                    "equity",
+                    "revenue",
+                    "expense"
+                  ]
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$",
+                  "description": "An ISO 4217 code, such as EUR."
+                },
+                "balance": {
+                  "type": "string",
+                  "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+                  "description": "A decimal string. Never a JSON number: a JSON number is an IEEE 754 double."
+                }
+              },
+              "required": [
+                "accountId",
+                "name",
+                "type",
+                "currency",
+                "balance"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "totals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$",
+                  "description": "An ISO 4217 code, such as EUR."
+                },
+                "debits": {
+                  "type": "string",
+                  "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+                  "description": "A decimal string. Never a JSON number: a JSON number is an IEEE 754 double."
+                },
+                "credits": {
+                  "type": "string",
+                  "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+                  "description": "A decimal string. Never a JSON number: a JSON number is an IEEE 754 double."
+                },
+                "balanced": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "currency",
+                "debits",
+                "credits",
+                "balanced"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "balanced": {
+            "type": "boolean",
+            "description": "False means this book does not add up, which is a fact about the data, not a query error."
+          }
+        },
+        "required": [
+          "bookId",
+          "asOf",
+          "accounts",
+          "totals",
+          "balanced"
+        ],
+        "additionalProperties": false
+      },
+      "PostingPage": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^\\d+$"
+                },
+                "entryId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "occurredAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "recordedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "string",
+                  "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+                  "description": "A decimal string. Never a JSON number: a JSON number is an IEEE 754 double."
+                },
+                "runningBalance": {
+                  "type": "string",
+                  "pattern": "^-?\\d+(?:\\.\\d{2,3})?$",
+                  "description": "The account balance through this posting, computed by the server."
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$",
+                  "description": "An ISO 4217 code, such as EUR."
+                }
+              },
+              "required": [
+                "id",
+                "entryId",
+                "occurredAt",
+                "recordedAt",
+                "description",
+                "amount",
+                "runningBalance",
+                "currency"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pass as `cursor` for the next page. Null on the last one."
+          }
+        },
+        "required": [
+          "accountId",
+          "items",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "Membership": {
+        "type": "object",
+        "properties": {
+          "bookId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "accountant",
+              "viewer"
+            ]
+          }
+        },
+        "required": [
+          "bookId",
+          "userId",
+          "email",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "IssuedApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "bookId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "accountant",
+              "viewer"
+            ]
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The leading segment of the token, stored so a key can be identified in a list."
+          },
+          "token": {
+            "type": "string",
+            "description": "The plaintext key. Returned once, here, and never again: what is stored is a SHA-256 hash, so there is nothing left to show on a later request."
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "bookId",
+          "name",
+          "role",
+          "prefix",
+          "token",
+          "warning"
+        ],
+        "additionalProperties": false
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string"
+          },
+          "tokenType": {
+            "type": "string",
+            "const": "Bearer"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "email": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "email"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "accessToken",
+          "tokenType",
+          "expiresAt",
+          "user"
+        ],
+        "additionalProperties": false
+      },
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 Problem Details. `code` is the stable identifier a client should branch on; `requestId` is echoed in `X-Request-Id` and is what finds the failure in the logs.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri",
+            "description": "An identifier, not a URL to fetch."
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string",
+            "description": "The path that produced it."
+          },
+          "code": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "description": "Field-level detail, on validation failures only.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "message"
+              ]
+            }
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "requestId"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Either a JWT access token from `/auth/login`, or an API key issued by `POST /books/{bookId}/api-keys`. Both are presented as `Authorization: Bearer <value>`; a key is recognised by its `lk_` prefix."
+      },
+      "refreshCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "refresh_token",
+        "description": "Set by the auth endpoints, httpOnly, scoped to `/auth`. Never readable by a script, which is the reason the short-lived access token is the one that lives in memory."
+      }
+    }
+  }
+}

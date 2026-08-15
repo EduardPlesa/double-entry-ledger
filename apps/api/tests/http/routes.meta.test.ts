@@ -85,6 +85,10 @@ describe('every route declares an access requirement', () => {
       .sort();
 
     expect(publicPaths).toEqual([
+      // The spec and the page that renders it. Public because a specification behind a
+      // credential is one nobody reads, and it describes shapes rather than data.
+      'get /docs',
+      'get /docs/openapi.json',
       'get /health',
       'post /auth/login',
       'post /auth/logout',
@@ -104,6 +108,29 @@ describe('every route declares an access requirement', () => {
       .sort();
 
     expect(authenticatedPaths).toEqual(['get /books', 'post /books']);
+  });
+
+  it('every route that takes a body declares its schema', () => {
+    // Two POSTs carry no body at all: refresh and logout authenticate with the cookie and
+    // read nothing from the request. Written out rather than inferred, so adding a third is a
+    // decision made here as well as in the registry - the same discipline as the two
+    // allowlists above.
+    const bodiless = ['post /auth/refresh', 'post /auth/logout'];
+
+    const missing = definitions()
+      .filter((definition) => definition.method === 'post' && definition.request?.body === undefined)
+      .map((definition) => `${definition.method} ${definition.path}`)
+      .filter((route) => !bodiless.includes(route));
+
+    expect(missing).toEqual([]);
+  });
+
+  it('every route that returns a resource declares its schema', () => {
+    const missing = definitions()
+      .filter((definition) => definition.access.kind !== 'public' && definition.response === undefined)
+      .map((definition) => `${definition.method} ${definition.path}`);
+
+    expect(missing).toEqual([]);
   });
 
   it('gives every route a summary', () => {
