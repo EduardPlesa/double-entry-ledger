@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams, useSearchParams } from 'react-router';
 import type { TrialBalanceResource } from '@ledger/shared';
@@ -47,17 +48,25 @@ export function TrialBalance() {
       <table className="mt-6 w-full text-sm">
         <tbody>
           {lines.map((line, index) => (
-            <tr key={line.accountId}>
-              <td>
-                {index === 0 || lines[index - 1]?.type !== line.type ? (
-                  <span className="block pt-3 font-semibold uppercase">{line.type}</span>
-                ) : null}
-                {line.name}
-              </td>
-              <td className="text-right text-gray-500">
-                <span>{line.balance}</span> <span>{line.currency}</span>
-              </td>
-            </tr>
+            // The type heading is its own row rather than a block inside the name cell. In one
+            // cell it made a two-line row against a one-line amount, and the amount rendered
+            // vertically centred - beside the heading rather than beside the account it
+            // belongs to, which reads as a subtotal the report never computed.
+            <Fragment key={line.accountId}>
+              {index === 0 || lines[index - 1]?.type !== line.type ? (
+                <tr>
+                  <td colSpan={2} className="pt-3 font-semibold uppercase">
+                    {line.type}
+                  </td>
+                </tr>
+              ) : null}
+              <tr>
+                <td>{line.name}</td>
+                <td className="text-right text-gray-500">
+                  <span>{line.balance}</span> <span>{line.currency}</span>
+                </td>
+              </tr>
+            </Fragment>
           ))}
         </tbody>
       </table>
